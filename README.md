@@ -175,6 +175,12 @@ Validate the config and inspect current tracked execution state without launchin
 ./run.sh --check
 ```
 
+Resume a partially completed wave and skip executions already marked `done` for the same inputs:
+
+```bash
+./run.sh --resume
+```
+
 Launch the wave:
 
 ```bash
@@ -208,6 +214,7 @@ Dry-run output shows the batch plan, including:
 - the last known tracked status for each configured execution
 - last failure class and exit code, if any
 - tracked worktree path and whether that worktree is clean, dirty, missing, or untracked
+- resume status and whether the stored resume fingerprint matches the current inputs
 
 Real execution:
 
@@ -217,12 +224,13 @@ Real execution:
 - creates or reuses git worktrees under `<git_dir>/.worktrees/`
 - refuses to reuse a tracked worktree if it is dirty
 - acquires a run lock so only one real wave runs from an install directory at a time
-- runs the selected CLI in safe unattended mode
-  - `claude`: `-p --permission-mode dontAsk`
+- runs the selected CLI in the adapter-defined unattended mode
+  - `claude`: `-p --allowedTools ... --max-turns 100 --output-format json --dangerously-skip-permissions`
   - `codex`: `exec -a never -s workspace-write`
 - updates `state.json`
 - prints `DONE` or `FAILED (<failure_class>)` per execution when a task fails
 - records `skipped` in `state.json` for executions not launched because fail-fast stopped later batches
+- supports `--resume`, which skips executions already marked `done` when the current CLI/model/prompt/spec inputs still match the recorded resume fingerprint
 - exits `1` if any execution failed
 
 ## Execution Flow
@@ -249,6 +257,7 @@ Batching rules:
 - `{ "parallel": "no" }` acts as a barrier between parallel waves, and you must insert those breaks manually when you want more tasks than `max_parallel` allows in a single batch.
 - If an execution fails inside a running parallel batch, the rest of that batch is allowed to finish.
 - Once a batch has any failure, Waverunner stops before launching later batches.
+- In `--resume` mode, executions already completed with matching inputs are skipped and the remaining work continues from the first incomplete batch.
 - Final process exit code is `1` if any execution failed.
 
 ## Prompt and Output Model
@@ -281,7 +290,7 @@ Write all deliverables to: <absolute output path>/
 
 The techspec is referenced by absolute path, not inlined into the prompt.
 
-In safe unattended mode, an execution can fail because the CLI refuses an operation under its sandbox or permission policy. Those failures should now classify as `permission_denied` instead of collapsing into `unknown`.
+Claude logs are captured as JSON output and treated as failed when Claude reports `is_error=true`, even if the process itself exits successfully.
 
 ## Worktree Model
 
@@ -297,12 +306,16 @@ Example:
 01_SPEC-03_autocorr
 ```
 
+If multiple executions would otherwise produce the same `exec_id`, Waverunner adds a deterministic numeric suffix such as `01_SPEC-03_autocorr_2`.
+
 For each execution, `run.sh` either:
 
 - reuses a tracked worktree from `state.json` if it still exists, or
 - creates a new worktree at `<git_dir>/.worktrees/<exec_id>`
 
 The branch name matches the worktree name. Reused tracked worktrees must be clean before Waverunner will run the task again. If a matching path already exists outside tracked state, Waverunner appends a timestamp suffix and retries.
+
+Resume matching is based on a stored fingerprint of the current execution inputs: CLI, model, effort, master prompt content, techspec content, and prompt content. If any of those change, `--resume` reruns that execution instead of skipping it.
 
 ## Who This Is For
 

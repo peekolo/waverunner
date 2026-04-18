@@ -30,18 +30,24 @@ You can also validate the config and inspect tracked execution state without lau
 ./run.sh --check
 ```
 
+If a previous wave partially completed, resume it without rerunning already completed matching executions:
+
+```bash
+./run.sh --resume
+```
+
 9. Launch the wave:
 
 ```bash
 ./run.sh
 ```
 
-The installed adapters currently run in safe unattended mode:
+The installed adapters currently run in these unattended modes:
 
-- `claude`: `-p --permission-mode dontAsk`
+- `claude`: `-p --allowedTools ... --max-turns 100 --output-format json --dangerously-skip-permissions`
 - `codex`: `exec -a never -s workspace-write`
 
-That means the wave should not pause for approval prompts, but a task can still fail if the CLI refuses an operation under its permission model or sandbox.
+That means the wave should not pause for approval prompts. Claude currently uses the same dangerous-permissions pattern that already works in your other project, constrained by an explicit allowed-tools list.
 
 ## Recommended Workflow
 
@@ -79,7 +85,7 @@ Guidance:
 - put execution-specific instructions in `prompt` or `prompt_path`
 - use `prompt` for short one-off nudges
 - use `prompt_path` for longer structured task instructions
-- avoid duplicate techspec basenames unless you want timestamp-suffixed `exec_id`s
+- duplicate techspec basenames are allowed; Waverunner now adds deterministic numeric suffixes to keep `exec_id`s stable across resume runs
 
 ## Reading the Outputs
 
@@ -88,9 +94,11 @@ For each wave run:
 - `logs/<wave_ts>/<exec_id>.prompt.md`: exact assembled prompt sent to the CLI
 - `logs/<wave_ts>/<exec_id>.log`: stdout and stderr from the CLI
 - `output/<wave_ts>/<exec_id>/`: deliverables written by the agent
-- `state.json`: latest tracked worktree path, status, exit code, and failure class, including `skipped` when fail-fast prevents later executions from launching
+- `state.json`: latest tracked worktree path, status, exit code, failure class, and resume fingerprint, including `skipped` when fail-fast prevents later executions from launching
 
 Use the prompt file first when debugging agent behavior. It is the audit record of what the runner actually sent.
+
+`--resume` skips executions that are already `done` when their stored fingerprint still matches the current CLI/model/prompt/spec inputs. If those inputs change, the execution runs again.
 
 ## Failure Handling
 
@@ -121,6 +129,12 @@ If you only want to validate the wave and inspect current tracked state before r
 
 ```bash
 ./run.sh --check
+```
+
+If part of the previous wave already completed successfully and you want to continue from there, use:
+
+```bash
+./run.sh --resume
 ```
 
 ## Worktree Hygiene

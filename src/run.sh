@@ -12,6 +12,7 @@ LOCK_INFO_PATH="$LOCK_DIR/info"
 
 DRY_RUN=0
 CHECK_ONLY=0
+RESUME_ONLY=0
 CLI=""
 PROJECT_ROOT=""
 GIT_DIR=""
@@ -45,6 +46,7 @@ EXEC_LOG_PATH=()
 EXEC_PROMPT_FILE=()
 EXEC_FAILURE_CLASS=()
 EXEC_EXIT_CODE=()
+EXEC_RESUME_KEY=()
 
 usage() {
   cat <<'EOF'
@@ -52,6 +54,7 @@ Usage:
   ./run.sh
   ./run.sh --dry-run
   ./run.sh --check
+  ./run.sh --resume
 EOF
 }
 
@@ -256,6 +259,7 @@ state_set_execution() {
   local status="$5"
   local failure_class="$6"
   local exit_code="$7"
+  local resume_key="$8"
   local tmp_file
 
   tmp_file=$(mktemp "$SCRIPT_DIR/state.json.tmp.XXXXXX") || die 'failed to create temporary state file' 2
@@ -267,13 +271,15 @@ state_set_execution() {
     --arg status "$status" \
     --arg failure_class "$failure_class" \
     --arg exit_code "$exit_code" \
+    --arg resume_key "$resume_key" \
     '.executions[$id] = {
       "worktree_path": $worktree_path,
       "branch": $branch,
       "last_run_ts": $ts,
       "last_status": $status,
       "last_failure_class": (if $failure_class == "" then null else $failure_class end),
-      "last_exit_code": (if $exit_code == "" then null else $exit_code end)
+      "last_exit_code": (if $exit_code == "" then null else $exit_code end),
+      "resume_key": (if $resume_key == "" then null else $resume_key end)
     }' \
     "$STATE_PATH" > "$tmp_file" || {
       rm -f "$tmp_file"
@@ -299,9 +305,8 @@ worktree_is_clean() {
 
 unique_exec_id() {
   local candidate="$1"
-  local ts="$2"
   local unique="$candidate"
-  local suffix=1
+  local suffix=2
   local found
   local existing
 
@@ -317,13 +322,84 @@ unique_exec_id() {
       printf '%s\n' "$unique"
       return 0
     fi
-    if [[ $suffix -eq 1 ]]; then
-      unique="${candidate}_$ts"
-    else
-      unique="${candidate}_$ts_$suffix"
-    fi
+    unique="${candidate}_$suffix"
     suffix=$((suffix + 1))
   done
+}
+
+hash_file() {
+  local path="$1"
+  git hash-object "$path" 2>/dev/null || return 1
+}
+
+hash_string() {
+  local value="$1"
+  printf '%s' "$value" | git hash-object --stdin 2>/dev/null || return 1
+}
+
+build_resume_key() {
+  local idx="$1"
+  local techspec_hash
+  local prompt_file_hash=""
+  local prompt_inline_hash=""
+  local master_hash
+
+  techspec_hash=$(hash_file "${EXEC_TECHSPEC_PATH[$idx]}") || die "failed to hash techspec for executions[$idx]" 2
+  master_hash=$(hash_file "$MASTER_PROMPT_PATH") || die 'failed to hash master prompt' 2
+
+  if [[ -n "${EXEC_PROMPT_PATH[$idx]}" ]]; then
+    prompt_file_hash=$(hash_file "${EXEC_PROMPT_PATH[$idx]}") || die "failed to hash prompt_path for executions[$idx]" 2
+  fi
+
+  if [[ -n "${EXEC_PROMPT_INLINE[$idx]}" ]]; then
+    prompt_inline_hash=$(hash_string "${EXEC_PROMPT_INLINE[$idx]}") || die "failed to hash inline prompt for executions[$idx]" 2
+  fi
+
+  printf '%s\n' "cli=$CLI
+model=${EXEC_MODEL[$idx]}
+effort=${EXEC_EFFORT[$idx]}
+master_hash=$master_hash
+techspec_hash=$techspec_hash
+prompt_path_hash=$prompt_file_hash
+prompt_inline_hash=$prompt_inline_hash" | git hash-object --stdin
+}
+
+execution_resume_status() {
+  local idx="$1"
+  local status
+  local state_key
+
+  status=$(state_get_field "${EXEC_ID[$idx]}" 'last_status')
+  state_key=$(state_get_field "${EXEC_ID[$idx]}" 'resume_key')
+
+  if [[ "$status" == "done" && -n "$state_key" && "$state_key" == "${EXEC_RESUME_KEY[$idx]}" ]]; then
+    printf '%s\n' 'done'
+    return 0
+  fi
+
+  if [[ "$status" == "running" && -n "$state_key" && "$state_key" == "${EXEC_RESUME_KEY[$idx]}" ]]; then
+    printf '%s\n' 'stale_running'
+    return 0
+  fi
+
+  if [[ -n "$status" ]]; then
+    printf '%s\n' "$status"
+    return 0
+  fi
+
+  printf '%s\n' 'never_run'
+}
+
+execution_should_run() {
+  local idx="$1"
+  local resume_status
+
+  if [[ "$RESUME_ONLY" != "1" ]]; then
+    return 0
+  fi
+
+  resume_status=$(execution_resume_status "$idx")
+  [[ "$resume_status" != "done" ]]
 }
 
 validate_top_level_file() {
@@ -370,7 +446,6 @@ validate_or_create_output_base() {
 }
 
 load_config() {
-  local parse_ts
   local parallel_streak=0
   local i
   local entry_json
@@ -425,8 +500,6 @@ load_config() {
 
   jq -e '.executions | type == "array"' "$CONFIG_PATH" >/dev/null 2>&1 || die 'config.json field executions must be an array' 2
   EXEC_COUNT=$(jq '.executions | length' "$CONFIG_PATH") || die 'config.json field executions must be an array' 2
-  parse_ts=$(date +%Y%m%d_%H%M%S)
-
   for ((i=0; i<EXEC_COUNT; i++)); do
     entry_json=$(jq -c ".executions[$i]" "$CONFIG_PATH") || die "failed to read executions[$i]" 2
     key_count=$(json_string "$entry_json" 'keys_unsorted | length')
@@ -483,8 +556,9 @@ load_config() {
     EXEC_PROMPT_PATH[$i]="$prompt_path_abs"
     EXEC_MODEL[$i]="$model"
     EXEC_EFFORT[$i]="$effort"
-    EXEC_ID[$i]="$(unique_exec_id "$base_exec_id" "$parse_ts")"
+    EXEC_ID[$i]="$(unique_exec_id "$base_exec_id")"
     adapter_validate_execution "$i"
+    EXEC_RESUME_KEY[$i]="$(build_resume_key "$i")"
 
     if [[ "$parallel" == "yes" ]]; then
       parallel_streak=$((parallel_streak + 1))
@@ -695,7 +769,8 @@ mark_running() {
     "$WAVE_TS" \
     'running' \
     '' \
-    ''
+    '' \
+    "${EXEC_RESUME_KEY[$idx]}"
 }
 
 mark_finished() {
@@ -710,7 +785,8 @@ mark_finished() {
     "$WAVE_TS" \
     "$status" \
     "$failure_class" \
-    "$exit_code"
+    "$exit_code" \
+    "${EXEC_RESUME_KEY[$idx]}"
 }
 
 mark_skipped() {
@@ -728,7 +804,21 @@ mark_skipped() {
     "$WAVE_TS" \
     'skipped' \
     'fail_fast' \
-    ''
+    '' \
+    "${EXEC_RESUME_KEY[$idx]}"
+}
+
+mark_stale_running_resumed() {
+  local idx="$1"
+  state_set_execution \
+    "${EXEC_ID[$idx]}" \
+    "${EXEC_WORKTREE_PATH[$idx]}" \
+    "${EXEC_WORKTREE_BRANCH[$idx]}" \
+    "$WAVE_TS" \
+    'failed' \
+    'interrupted' \
+    '' \
+    "${EXEC_RESUME_KEY[$idx]}"
 }
 
 run_batch() {
@@ -742,6 +832,7 @@ run_batch() {
   local status
   local failure_class
   local batch_failed=0
+  local resume_status
 
   batch_indices=("$@")
   batch_pids=()
@@ -749,6 +840,12 @@ run_batch() {
   CHILDREN=()
 
   for idx in "${batch_indices[@]}"; do
+    if ! execution_should_run "$idx"; then
+      DONE_COUNT=$((DONE_COUNT + 1))
+      printf '%s: SKIPPED (already done in matching prior run)\n' "${EXEC_ID[$idx]}"
+      continue
+    fi
+
     prepare_execution "$idx"
     rc=$?
     if [[ $rc -ne 0 ]]; then
@@ -789,6 +886,14 @@ run_batch() {
       ANY_FAILED=1
       FAILED_COUNT=$((FAILED_COUNT + 1))
       continue
+    fi
+
+    if [[ "$RESUME_ONLY" == "1" ]]; then
+      resume_status=$(execution_resume_status "$idx")
+      if [[ "$resume_status" == "stale_running" ]]; then
+        mark_stale_running_resumed "$idx"
+        say "Resuming ${EXEC_ID[$idx]} after stale running state"
+      fi
     fi
 
     say "Starting ${EXEC_ID[$idx]} | model=${EXEC_MODEL[$idx]} | worktree=${EXEC_WORKTREE_PATH[$idx]}"
@@ -913,6 +1018,9 @@ mark_remaining_skipped_from() {
     if [[ "${EXEC_IS_BARRIER[$i]}" == "1" ]]; then
       continue
     fi
+    if [[ "$RESUME_ONLY" == "1" ]] && ! execution_should_run "$i"; then
+      continue
+    fi
     mark_skipped "$i"
     skipped=$((skipped + 1))
   done
@@ -952,6 +1060,8 @@ run_check() {
   local worktree_path
   local branch
   local worktree_state
+  local resume_key
+  local resume_status
 
   say 'Config check: OK'
   say "CLI: $CLI"
@@ -981,7 +1091,9 @@ run_check() {
     exit_code=$(state_get_field "${EXEC_ID[$i]}" 'last_exit_code')
     worktree_path=$(state_get_field "${EXEC_ID[$i]}" 'worktree_path')
     branch=$(state_get_field "${EXEC_ID[$i]}" 'branch')
+    resume_key=$(state_get_field "${EXEC_ID[$i]}" 'resume_key')
     worktree_state=$(describe_state_worktree "$worktree_path")
+    resume_status=$(execution_resume_status "$i")
 
     if [[ -z "$status" ]]; then
       status='never_run'
@@ -1006,6 +1118,12 @@ run_check() {
     printf '    branch: %s\n' "$branch"
     printf '    worktree: %s\n' "$worktree_path"
     printf '    worktree_state: %s\n' "$worktree_state"
+    printf '    resume_status: %s\n' "$resume_status"
+    if [[ -n "$resume_key" && "$resume_key" == "${EXEC_RESUME_KEY[$i]}" ]]; then
+      printf '%s\n' '    resume_key_match: yes'
+    else
+      printf '%s\n' '    resume_key_match: no'
+    fi
   done
 }
 
@@ -1025,6 +1143,9 @@ run_execute() {
   say "Wave started: $WAVE_TS"
   say "CLI: $CLI"
   say "Max parallel: $MAX_PARALLEL"
+  if [[ "$RESUME_ONLY" == "1" ]]; then
+    say 'Mode: resume'
+  fi
   say "Logs: $LOG_DIR"
   say "Output: $OUTPUT_WAVE_DIR"
 
@@ -1109,6 +1230,8 @@ main() {
       DRY_RUN=1
     elif [[ "$1" == "--check" ]]; then
       CHECK_ONLY=1
+    elif [[ "$1" == "--resume" ]]; then
+      RESUME_ONLY=1
     else
       usage
       exit 2
