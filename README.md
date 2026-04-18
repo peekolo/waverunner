@@ -1,8 +1,8 @@
 # Waverunner
 
-Waverunner is a minimal Bash orchestrator for running repeatable waves of AI CLI work across isolated git worktrees.
+Waverunner lets you hand one project a list of AI tasks, then automatically spin them out into isolated git worktrees, run them in parallel or sequence, and keep the prompts, logs, outputs, and state organized for review. If you already use AI coding agents but do not want every core repo reinventing its own one-off orchestration scripts, Waverunner extracts that infrastructure into a reusable runner so your product repos stay focused on product work instead of worktree plumbing.
 
-It gives you a single `config.json`, turns that into sequential and parallel execution batches, assembles the exact prompt sent to each agent, and keeps per-run logs and state on disk. The goal is simple: make multi-task AI execution less ad hoc without forcing you into a larger platform.
+Unlike worktree managers that focus on interactive session control, Waverunner is a lightweight, config-driven execution unit: define the wave once, reuse it across projects, reduce redundant setup, and stop rebuilding the same custom runner logic inside repos where it is not part of the actual product.
 
 ## Why Use It
 
@@ -73,6 +73,8 @@ Current upgrade behavior overwrites only `run.sh`.
 ## Configure
 
 `run.sh` always reads `config.json` from its own directory. All relative paths inside `config.json` are resolved from that installed directory.
+
+You do not need to fill in the JSON by hand. In practice, many teams ask their AI coding agent to generate or update `config.json` for the wave they want to run.
 
 Example:
 
