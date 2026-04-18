@@ -4,6 +4,8 @@ Waverunner lets you hand one project a list of AI tasks, then automatically spin
 
 Unlike worktree managers that focus on interactive session control, Waverunner is a lightweight, config-driven execution unit: define the wave once, reuse it across projects, reduce redundant setup, and stop rebuilding the same custom runner logic inside repos where it is not part of the actual product.
 
+Waverunner is Ralph-adjacent, not a Ralph implementation. Ralph Wiggum is an iterative fresh-context loop that keeps rerunning an agent until the work is done; Waverunner is a declarative wave runner that executes a planned batch of isolated tasks across git worktrees.
+
 ## Quick Workflow
 
 The intended operator flow is:
