@@ -1,0 +1,8 @@
+{
+  "techspec_path": "./specs/SPEC-XX.md",
+  "prompt_path": "./prompts/SPEC-XX.md",
+  "prompt": "optional inline note",
+  "parallel": "yes",
+  "model": "claude-sonnet-4-6",
+  "effort": "high"
+}
