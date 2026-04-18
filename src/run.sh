@@ -6,18 +6,25 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 CONFIG_PATH="$SCRIPT_DIR/config.json"
 STATE_PATH="$SCRIPT_DIR/state.json"
 LOGS_BASE="$SCRIPT_DIR/logs"
+LOCK_DIR="$SCRIPT_DIR/.run.lock"
+LOCK_INFO_PATH="$LOCK_DIR/info"
 
 DRY_RUN=0
+CHECK_ONLY=0
 CLI=""
 PROJECT_ROOT=""
 GIT_DIR=""
 MASTER_PROMPT_PATH=""
 OUTPUT_BASE=""
+MAX_PARALLEL=3
+OUTPUT_WAVE_DIR=""
 WAVE_TS=""
 LOG_DIR=""
 ANY_FAILED=0
 DONE_COUNT=0
 FAILED_COUNT=0
+SKIPPED_COUNT=0
+LOCK_HELD=0
 
 CHILDREN=()
 
@@ -35,17 +42,24 @@ EXEC_WORKTREE_PATH=()
 EXEC_WORKTREE_BRANCH=()
 EXEC_LOG_PATH=()
 EXEC_PROMPT_FILE=()
+EXEC_FAILURE_CLASS=()
+EXEC_EXIT_CODE=()
 
 usage() {
   cat <<'EOF'
 Usage:
   ./run.sh
   ./run.sh --dry-run
+  ./run.sh --check
 EOF
 }
 
 say_err() {
   printf '%s\n' "$*" >&2
+}
+
+say() {
+  printf '%s\n' "$*"
 }
 
 die() {
@@ -87,7 +101,7 @@ check_prereqs() {
   require_cmd git
 }
 
-cleanup() {
+cleanup_interrupt() {
   local pid
   say_err 'interrupted; killing children...'
   for pid in "${CHILDREN[@]}"; do
@@ -97,7 +111,32 @@ cleanup() {
   exit 130
 }
 
-trap cleanup INT TERM
+release_lock() {
+  if [[ "$LOCK_HELD" == "1" && -d "$LOCK_DIR" ]]; then
+    rm -rf "$LOCK_DIR"
+    LOCK_HELD=0
+  fi
+}
+
+trap cleanup_interrupt INT TERM
+trap release_lock EXIT
+
+acquire_run_lock() {
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    LOCK_HELD=1
+    {
+      printf 'pid=%s\n' "$$"
+      printf 'started_at=%s\n' "$(date +%Y%m%d_%H%M%S)"
+    } > "$LOCK_INFO_PATH"
+    return 0
+  fi
+
+  if [[ -f "$LOCK_INFO_PATH" ]]; then
+    die "another wave runner process appears to be active for this install dir; inspect $LOCK_INFO_PATH or remove the stale lock if that process is dead" 2
+  fi
+
+  die "another wave runner process appears to be active for this install dir: $LOCK_DIR" 2
+}
 
 normalize_path() {
   local input="$1"
@@ -198,6 +237,8 @@ state_set_execution() {
   local branch="$3"
   local ts="$4"
   local status="$5"
+  local failure_class="$6"
+  local exit_code="$7"
   local tmp_file
 
   tmp_file=$(mktemp "$SCRIPT_DIR/state.json.tmp.XXXXXX") || die 'failed to create temporary state file' 2
@@ -207,11 +248,15 @@ state_set_execution() {
     --arg branch "$branch" \
     --arg ts "$ts" \
     --arg status "$status" \
+    --arg failure_class "$failure_class" \
+    --arg exit_code "$exit_code" \
     '.executions[$id] = {
       "worktree_path": $worktree_path,
       "branch": $branch,
       "last_run_ts": $ts,
-      "last_status": $status
+      "last_status": $status,
+      "last_failure_class": (if $failure_class == "" then null else $failure_class end),
+      "last_exit_code": (if $exit_code == "" then null else $exit_code end)
     }' \
     "$STATE_PATH" > "$tmp_file" || {
       rm -f "$tmp_file"
@@ -228,6 +273,11 @@ git_worktree_list_has_path() {
 git_branch_exists() {
   local branch="$1"
   git -C "$GIT_DIR" show-ref --verify --quiet "refs/heads/$branch"
+}
+
+worktree_is_clean() {
+  local path="$1"
+  [[ -z "$(git -C "$path" status --porcelain 2>/dev/null)" ]]
 }
 
 unique_exec_id() {
@@ -276,7 +326,27 @@ validate_directory_path() {
 }
 
 validate_or_create_output_base() {
-  if mkdir -p "$OUTPUT_BASE" >/dev/null 2>&1; then
+  local parent
+
+  if [[ -e "$OUTPUT_BASE" && ! -d "$OUTPUT_BASE" ]]; then
+    die "output_base exists but is not a directory: $OUTPUT_BASE" 2
+  fi
+
+  if [[ "$DRY_RUN" == "1" || "$CHECK_ONLY" == "1" ]]; then
+    if [[ -d "$OUTPUT_BASE" ]]; then
+      [[ -w "$OUTPUT_BASE" ]] || die "output_base is not writable: $OUTPUT_BASE" 2
+      return 0
+    fi
+
+    parent=$(dirname "$OUTPUT_BASE")
+    while [[ ! -d "$parent" && "$parent" != "/" ]]; do
+      parent=$(dirname "$parent")
+    done
+    [[ -d "$parent" && -w "$parent" ]] || die "output_base parent is not writable: $parent" 2
+    return 0
+  fi
+
+  if mkdir -p "$OUTPUT_BASE" >/dev/null 2>&1 && [[ -w "$OUTPUT_BASE" ]]; then
     return 0
   fi
   die "output_base is not writable or could not be created: $OUTPUT_BASE" 2
@@ -285,6 +355,7 @@ validate_or_create_output_base() {
 load_config() {
   local parse_ts
   local codex_effort_warned=0
+  local parallel_streak=0
   local i
   local entry_json
   local key_count
@@ -308,6 +379,7 @@ load_config() {
   GIT_DIR=$(jq -r '.git_dir // empty' "$CONFIG_PATH")
   MASTER_PROMPT_PATH=$(jq -r '.master_prompt_path // empty' "$CONFIG_PATH")
   OUTPUT_BASE=$(jq -r '.output_base // empty' "$CONFIG_PATH")
+  MAX_PARALLEL=$(jq -r '.max_parallel // 3' "$CONFIG_PATH")
 
   [[ -n "$CLI" ]] || die 'config.json missing required field: cli' 2
   [[ -n "$PROJECT_ROOT" ]] || die 'config.json missing required field: project_root' 2
@@ -318,6 +390,10 @@ load_config() {
   if [[ "$CLI" != "claude" && "$CLI" != "codex" ]]; then
     die "config.json field cli must be \"claude\" or \"codex\"; got: $CLI" 2
   fi
+  if ! [[ "$MAX_PARALLEL" =~ ^[1-9][0-9]*$ ]]; then
+    die "config.json field max_parallel must be a positive integer; got: $MAX_PARALLEL" 2
+  fi
+  require_cmd "$CLI"
 
   PROJECT_ROOT=$(normalize_path "$PROJECT_ROOT" "$SCRIPT_DIR")
   GIT_DIR=$(normalize_path "$GIT_DIR" "$SCRIPT_DIR")
@@ -359,6 +435,7 @@ load_config() {
         EXEC_MODEL[$i]=""
         EXEC_EFFORT[$i]=""
         EXEC_ID[$i]=""
+        parallel_streak=0
         continue
       fi
       die "executions[$i] is invalid; non-empty entries require techspec_path and barrier entries must be exactly {\"parallel\":\"no\"}" 2
@@ -397,6 +474,15 @@ load_config() {
     EXEC_MODEL[$i]="$model"
     EXEC_EFFORT[$i]="$effort"
     EXEC_ID[$i]="$(unique_exec_id "$base_exec_id" "$parse_ts")"
+
+    if [[ "$parallel" == "yes" ]]; then
+      parallel_streak=$((parallel_streak + 1))
+      if [[ $parallel_streak -gt $MAX_PARALLEL ]]; then
+        die "config.json has more than $MAX_PARALLEL consecutive parallel executions ending at executions[$i]; insert {\"parallel\":\"no\"} batch breaks manually or raise max_parallel" 2
+      fi
+    else
+      parallel_streak=0
+    fi
   done
 }
 
@@ -450,17 +536,23 @@ ensure_worktree() {
   local idx="$1"
   local path="${EXEC_WORKTREE_PATH[$idx]}"
   local branch="${EXEC_WORKTREE_BRANCH[$idx]}"
+  local log_file="${EXEC_LOG_PATH[$idx]}"
 
   if git_worktree_list_has_path "$path"; then
+    if ! worktree_is_clean "$path"; then
+      printf '%s\n' "tracked worktree is not clean: $path" > "$log_file"
+      printf '%s\n' 'clean or remove the worktree manually before rerunning this execution' >> "$log_file"
+      return 10
+    fi
     return 0
   fi
 
   mkdir -p "$GIT_DIR/.worktrees"
 
   if git_branch_exists "$branch"; then
-    git -C "$GIT_DIR" worktree add "$path" "$branch" >/dev/null 2>&1 || return 1
+    git -C "$GIT_DIR" worktree add "$path" "$branch" > "$log_file" 2>&1 || return 11
   else
-    git -C "$GIT_DIR" worktree add -b "$branch" "$path" >/dev/null 2>&1 || return 1
+    git -C "$GIT_DIR" worktree add -b "$branch" "$path" > "$log_file" 2>&1 || return 11
   fi
 }
 
@@ -475,15 +567,21 @@ prepare_execution() {
 
   resolve_worktree_plan "$idx"
   exec_id="${EXEC_ID[$idx]}"
-  output_dir="$OUTPUT_BASE/$exec_id"
+  output_dir="$OUTPUT_WAVE_DIR/$exec_id"
   prompt_file="$LOG_DIR/$exec_id.prompt.md"
   log_file="$LOG_DIR/$exec_id.log"
   prompt_inline="${EXEC_PROMPT_INLINE[$idx]}"
   prompt_path="${EXEC_PROMPT_PATH[$idx]}"
 
-  mkdir -p "$output_dir"
+  EXEC_OUTPUT_DIR[$idx]="$output_dir"
+  EXEC_PROMPT_FILE[$idx]="$prompt_file"
+  EXEC_LOG_PATH[$idx]="$log_file"
 
-  {
+  if ! mkdir -p "$output_dir" >/dev/null 2>&1; then
+    return 20
+  fi
+
+  if ! {
     cat "$MASTER_PROMPT_PATH"
     printf '\n\n---\n\n'
     if [[ -n "$prompt_inline" ]]; then
@@ -498,11 +596,11 @@ prepare_execution() {
     printf 'Read your techspec at: %s\n' "${EXEC_TECHSPEC_PATH[$idx]}"
     printf '\n## Output directory\n'
     printf 'Write all deliverables to: %s/\n' "$output_dir"
-  } > "$prompt_file"
+  } > "$prompt_file"; then
+    return 21
+  fi
 
-  EXEC_OUTPUT_DIR[$idx]="$output_dir"
-  EXEC_PROMPT_FILE[$idx]="$prompt_file"
-  EXEC_LOG_PATH[$idx]="$log_file"
+  return 0
 }
 
 print_execution_plan() {
@@ -523,7 +621,44 @@ print_execution_plan() {
   fi
   printf '    techspec: %s\n' "${EXEC_TECHSPEC_PATH[$idx]}"
   printf '    worktree: %s\n' "${EXEC_WORKTREE_PATH[$idx]}"
-  printf '    output_dir: %s/%s/\n' "$OUTPUT_BASE" "${EXEC_ID[$idx]}"
+  printf '    output_dir: %s/%s/\n' "$OUTPUT_WAVE_DIR" "${EXEC_ID[$idx]}"
+}
+
+classify_task_failure() {
+  local log_file="$1"
+  local exit_code="$2"
+
+  if [[ "$exit_code" == "127" ]]; then
+    printf '%s\n' 'cli_not_found'
+    return 0
+  fi
+
+  if [[ ! -f "$log_file" ]]; then
+    printf '%s\n' 'unknown'
+    return 0
+  fi
+
+  if grep -E -i 'rate limit|rate-limit|too many requests|429|quota|usage limit|capacity|try again later' "$log_file" >/dev/null 2>&1; then
+    printf '%s\n' 'rate_limit'
+    return 0
+  fi
+
+  if grep -E -i 'authentication|unauthorized|forbidden|api key|not logged in|login required|invalid credential|invalid token|permission denied|auth' "$log_file" >/dev/null 2>&1; then
+    printf '%s\n' 'auth_error'
+    return 0
+  fi
+
+  if grep -E -i 'network|timed out|timeout|connection reset|connection refused|temporary failure|dns|enotfound|econn|tls|ssl' "$log_file" >/dev/null 2>&1; then
+    printf '%s\n' 'network_error'
+    return 0
+  fi
+
+  if grep -E -i 'interrupted|cancelled|canceled|terminated by signal|sigint|sigterm' "$log_file" >/dev/null 2>&1; then
+    printf '%s\n' 'interrupted'
+    return 0
+  fi
+
+  printf '%s\n' 'unknown'
 }
 
 run_cli() {
@@ -572,18 +707,42 @@ mark_running() {
     "${EXEC_WORKTREE_PATH[$idx]}" \
     "${EXEC_WORKTREE_BRANCH[$idx]}" \
     "$WAVE_TS" \
-    'running'
+    'running' \
+    '' \
+    ''
 }
 
 mark_finished() {
   local idx="$1"
   local status="$2"
+  local failure_class="$3"
+  local exit_code="$4"
   state_set_execution \
     "${EXEC_ID[$idx]}" \
     "${EXEC_WORKTREE_PATH[$idx]}" \
     "${EXEC_WORKTREE_BRANCH[$idx]}" \
     "$WAVE_TS" \
-    "$status"
+    "$status" \
+    "$failure_class" \
+    "$exit_code"
+}
+
+mark_skipped() {
+  local idx="$1"
+  local existing_path
+  local existing_branch
+
+  existing_path=$(state_get_field "${EXEC_ID[$idx]}" 'worktree_path')
+  existing_branch=$(state_get_field "${EXEC_ID[$idx]}" 'branch')
+
+  state_set_execution \
+    "${EXEC_ID[$idx]}" \
+    "$existing_path" \
+    "$existing_branch" \
+    "$WAVE_TS" \
+    'skipped' \
+    'fail_fast' \
+    ''
 }
 
 run_batch() {
@@ -595,6 +754,8 @@ run_batch() {
   local i
   local rc
   local status
+  local failure_class
+  local batch_failed=0
 
   batch_indices=("$@")
   batch_pids=()
@@ -603,15 +764,48 @@ run_batch() {
 
   for idx in "${batch_indices[@]}"; do
     prepare_execution "$idx"
-    ensure_worktree "$idx" || {
-      EXEC_LOG_PATH[$idx]="$LOG_DIR/${EXEC_ID[$idx]}.log"
-      printf '%s\n' "failed to create or reuse worktree: ${EXEC_WORKTREE_PATH[$idx]}" > "${EXEC_LOG_PATH[$idx]}"
-      mark_finished "$idx" 'failed'
-      printf '%s: FAILED | log=%s\n' "${EXEC_ID[$idx]}" "${EXEC_LOG_PATH[$idx]}"
+    rc=$?
+    if [[ $rc -ne 0 ]]; then
+      failure_class='prompt_build_error'
+      case "$rc" in
+        20)
+          printf '%s\n' "output directory could not be created: ${EXEC_OUTPUT_DIR[$idx]}" > "${EXEC_LOG_PATH[$idx]}"
+          ;;
+        21)
+          printf '%s\n' "failed to write assembled prompt file: ${EXEC_PROMPT_FILE[$idx]}" > "${EXEC_LOG_PATH[$idx]}"
+          ;;
+        *)
+          printf '%s\n' "failed to prepare execution artifacts for: ${EXEC_ID[$idx]}" > "${EXEC_LOG_PATH[$idx]}"
+          ;;
+      esac
+      EXEC_FAILURE_CLASS[$idx]="$failure_class"
+      EXEC_EXIT_CODE[$idx]=''
+      mark_finished "$idx" 'failed' "$failure_class" ''
+      printf '%s: FAILED (%s) | log=%s\n' "${EXEC_ID[$idx]}" "$failure_class" "${EXEC_LOG_PATH[$idx]}"
+      batch_failed=1
       ANY_FAILED=1
       FAILED_COUNT=$((FAILED_COUNT + 1))
       continue
-    }
+    fi
+
+    ensure_worktree "$idx"
+    rc=$?
+    if [[ $rc -ne 0 ]]; then
+      case "$rc" in
+        10) failure_class='dirty_worktree' ;;
+        *) failure_class='worktree_error' ;;
+      esac
+      EXEC_FAILURE_CLASS[$idx]="$failure_class"
+      EXEC_EXIT_CODE[$idx]=''
+      mark_finished "$idx" 'failed' "$failure_class" ''
+      printf '%s: FAILED (%s) | log=%s\n' "${EXEC_ID[$idx]}" "$failure_class" "${EXEC_LOG_PATH[$idx]}"
+      batch_failed=1
+      ANY_FAILED=1
+      FAILED_COUNT=$((FAILED_COUNT + 1))
+      continue
+    fi
+
+    say "Starting ${EXEC_ID[$idx]} | model=${EXEC_MODEL[$idx]} | worktree=${EXEC_WORKTREE_PATH[$idx]}"
     mark_running "$idx"
     run_task_async "$idx" &
     pid=$!
@@ -626,22 +820,37 @@ run_batch() {
     if wait "$pid"; then
       rc=0
       status='done'
+      failure_class=''
       DONE_COUNT=$((DONE_COUNT + 1))
     else
       rc=$?
       status='failed'
+      failure_class=$(classify_task_failure "${EXEC_LOG_PATH[$idx]}" "$rc")
+      batch_failed=1
       ANY_FAILED=1
       FAILED_COUNT=$((FAILED_COUNT + 1))
     fi
-    mark_finished "$idx" "$status"
+    EXEC_FAILURE_CLASS[$idx]="$failure_class"
+    EXEC_EXIT_CODE[$idx]="$rc"
+    if [[ $rc -eq 0 ]]; then
+      mark_finished "$idx" "$status" '' '0'
+    else
+      mark_finished "$idx" "$status" "$failure_class" "$rc"
+    fi
     if [[ $rc -eq 0 ]]; then
       printf '%s: DONE | log=%s\n' "${EXEC_ID[$idx]}" "${EXEC_LOG_PATH[$idx]}"
     else
-      printf '%s: FAILED | log=%s\n' "${EXEC_ID[$idx]}" "${EXEC_LOG_PATH[$idx]}"
+      printf '%s: FAILED (%s) | log=%s\n' "${EXEC_ID[$idx]}" "$failure_class" "${EXEC_LOG_PATH[$idx]}"
     fi
   done
 
   CHILDREN=()
+
+  if [[ $batch_failed -ne 0 ]]; then
+    return 1
+  fi
+
+  return 0
 }
 
 run_dry_run() {
@@ -695,19 +904,157 @@ print_batch() {
   done
 }
 
+count_non_barrier_from() {
+  local start_idx="$1"
+  local i
+  local count=0
+
+  for ((i=start_idx; i<EXEC_COUNT; i++)); do
+    if [[ "${EXEC_IS_BARRIER[$i]}" != "1" ]]; then
+      count=$((count + 1))
+    fi
+  done
+
+  printf '%s\n' "$count"
+}
+
+mark_remaining_skipped_from() {
+  local start_idx="$1"
+  local i
+  local skipped=0
+
+  for ((i=start_idx; i<EXEC_COUNT; i++)); do
+    if [[ "${EXEC_IS_BARRIER[$i]}" == "1" ]]; then
+      continue
+    fi
+    mark_skipped "$i"
+    skipped=$((skipped + 1))
+  done
+
+  printf '%s\n' "$skipped"
+}
+
+describe_state_worktree() {
+  local path="$1"
+
+  if [[ -z "$path" ]]; then
+    printf '%s\n' 'none'
+    return 0
+  fi
+
+  if git_worktree_list_has_path "$path"; then
+    if worktree_is_clean "$path"; then
+      printf '%s\n' 'tracked-clean'
+    else
+      printf '%s\n' 'tracked-dirty'
+    fi
+    return 0
+  fi
+
+  if [[ -e "$path" ]]; then
+    printf '%s\n' 'path-exists-untracked'
+  else
+    printf '%s\n' 'missing'
+  fi
+}
+
+run_check() {
+  local i
+  local status
+  local failure_class
+  local exit_code
+  local worktree_path
+  local branch
+  local worktree_state
+
+  say 'Config check: OK'
+  say "CLI: $CLI"
+  say "Project root: $PROJECT_ROOT"
+  say "Git dir: $GIT_DIR"
+  say "Master prompt: $MASTER_PROMPT_PATH"
+  say "Output base: $OUTPUT_BASE"
+  say "Max parallel: $MAX_PARALLEL"
+  say ''
+  say 'Planned batches:'
+  run_dry_run
+  say ''
+  say 'Tracked execution state:'
+
+  if [[ $EXEC_COUNT -eq 0 ]]; then
+    say '  No executions configured.'
+    return 0
+  fi
+
+  for ((i=0; i<EXEC_COUNT; i++)); do
+    if [[ "${EXEC_IS_BARRIER[$i]}" == "1" ]]; then
+      continue
+    fi
+
+    status=$(state_get_field "${EXEC_ID[$i]}" 'last_status')
+    failure_class=$(state_get_field "${EXEC_ID[$i]}" 'last_failure_class')
+    exit_code=$(state_get_field "${EXEC_ID[$i]}" 'last_exit_code')
+    worktree_path=$(state_get_field "${EXEC_ID[$i]}" 'worktree_path')
+    branch=$(state_get_field "${EXEC_ID[$i]}" 'branch')
+    worktree_state=$(describe_state_worktree "$worktree_path")
+
+    if [[ -z "$status" ]]; then
+      status='never_run'
+    fi
+    if [[ -z "$failure_class" ]]; then
+      failure_class='-'
+    fi
+    if [[ -z "$exit_code" ]]; then
+      exit_code='-'
+    fi
+    if [[ -z "$branch" ]]; then
+      branch='-'
+    fi
+    if [[ -z "$worktree_path" ]]; then
+      worktree_path='-'
+    fi
+
+    printf '  - exec_id: %s\n' "${EXEC_ID[$i]}"
+    printf '    status: %s\n' "$status"
+    printf '    failure_class: %s\n' "$failure_class"
+    printf '    exit_code: %s\n' "$exit_code"
+    printf '    branch: %s\n' "$branch"
+    printf '    worktree: %s\n' "$worktree_path"
+    printf '    worktree_state: %s\n' "$worktree_state"
+  done
+}
+
 run_execute() {
   local -a batch
   local i
+  local batch_num=1
+  local batch_rc=0
+  local stop_after_failure=0
+  local remaining_count=0
 
+  acquire_run_lock
   init_state
-  mkdir -p "$LOG_DIR"
+  mkdir -p "$LOG_DIR" "$OUTPUT_WAVE_DIR" >/dev/null 2>&1 || die "failed to create log or output directories for wave: $WAVE_TS" 2
   batch=()
+
+  say "Wave started: $WAVE_TS"
+  say "CLI: $CLI"
+  say "Max parallel: $MAX_PARALLEL"
+  say "Logs: $LOG_DIR"
+  say "Output: $OUTPUT_WAVE_DIR"
 
   for ((i=0; i<EXEC_COUNT; i++)); do
     if [[ "${EXEC_IS_BARRIER[$i]}" == "1" ]]; then
       if [[ ${#batch[@]} -gt 0 ]]; then
+        say "Batch $batch_num started: ${#batch[@]} execution(s) in parallel"
         run_batch "${batch[@]}"
+        batch_rc=$?
+        batch_num=$((batch_num + 1))
         batch=()
+        if [[ $batch_rc -ne 0 ]]; then
+          stop_after_failure=1
+          remaining_count=$(mark_remaining_skipped_from $((i + 1)))
+          break
+        fi
       fi
       continue
     fi
@@ -716,18 +1063,50 @@ run_execute() {
       batch+=("$i")
     else
       if [[ ${#batch[@]} -gt 0 ]]; then
+        say "Batch $batch_num started: ${#batch[@]} execution(s) in parallel"
         run_batch "${batch[@]}"
+        batch_rc=$?
+        batch_num=$((batch_num + 1))
         batch=()
+        if [[ $batch_rc -ne 0 ]]; then
+          stop_after_failure=1
+          remaining_count=$(mark_remaining_skipped_from "$i")
+          break
+        fi
       fi
+      say "Batch $batch_num started: 1 execution in sequence"
       run_batch "$i"
+      batch_rc=$?
+      batch_num=$((batch_num + 1))
+      if [[ $batch_rc -ne 0 ]]; then
+        stop_after_failure=1
+        remaining_count=$(mark_remaining_skipped_from $((i + 1)))
+        break
+      fi
     fi
   done
 
-  if [[ ${#batch[@]} -gt 0 ]]; then
+  if [[ $stop_after_failure -eq 0 && ${#batch[@]} -gt 0 ]]; then
+    say "Batch $batch_num started: ${#batch[@]} execution(s) in parallel"
     run_batch "${batch[@]}"
+    batch_rc=$?
+    batch_num=$((batch_num + 1))
+    if [[ $batch_rc -ne 0 ]]; then
+      stop_after_failure=1
+    fi
   fi
 
-  printf 'Summary: done=%d failed=%d\n' "$DONE_COUNT" "$FAILED_COUNT"
+  if [[ $stop_after_failure -ne 0 ]]; then
+    SKIPPED_COUNT=$remaining_count
+    if [[ $remaining_count -gt 0 ]]; then
+      say "Fail-fast: stopping before later batches because the previous batch failed"
+      say "Skipped executions: $remaining_count"
+    else
+      say "Fail-fast: no later batches were launched because the previous batch failed"
+    fi
+  fi
+
+  printf 'Summary: done=%d failed=%d skipped=%d\n' "$DONE_COUNT" "$FAILED_COUNT" "$SKIPPED_COUNT"
   if [[ $ANY_FAILED -ne 0 ]]; then
     exit 1
   fi
@@ -742,6 +1121,8 @@ main() {
   if [[ $# -eq 1 ]]; then
     if [[ "$1" == "--dry-run" ]]; then
       DRY_RUN=1
+    elif [[ "$1" == "--check" ]]; then
+      CHECK_ONLY=1
     else
       usage
       exit 2
@@ -752,8 +1133,11 @@ main() {
   load_config
   WAVE_TS=$(date +%Y%m%d_%H%M%S)
   LOG_DIR="$LOGS_BASE/$WAVE_TS"
+  OUTPUT_WAVE_DIR="$OUTPUT_BASE/$WAVE_TS"
 
-  if [[ $DRY_RUN -eq 1 ]]; then
+  if [[ $CHECK_ONLY -eq 1 ]]; then
+    run_check
+  elif [[ $DRY_RUN -eq 1 ]]; then
     run_dry_run
   else
     run_execute

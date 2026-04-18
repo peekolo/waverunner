@@ -10,17 +10,27 @@
 
 If you accept the `.gitignore` prompt during install, the installer appends a comment plus the whole wave-runner directory path to `<project_root>/.gitignore`.
 
+The installer also copies `howtouse.md` and prints a ready-to-paste prompt for your project AI agent.
+
 2. Edit `config.json`.
 3. Point `master_prompt_path` at your real project-wide prompt file.
 4. Replace the baked-in example execution with your real execution list.
 5. Point each execution at the real techspec and prompt files you want to use.
-6. Inspect the plan:
+6. Set `max_parallel` if you want something other than the default of `3`.
+7. Keep each parallel batch at or below `max_parallel` and insert `{ "parallel": "no" }` breaks manually when needed.
+8. Inspect the plan:
 
 ```bash
 ./run.sh --dry-run
 ```
 
-7. Launch the wave:
+You can also validate the config and inspect tracked execution state without launching anything:
+
+```bash
+./run.sh --check
+```
+
+9. Launch the wave:
 
 ```bash
 ./run.sh
@@ -31,8 +41,9 @@ If you accept the `.gitignore` prompt during install, the installer appends a co
 1. Keep the file referenced by `master_prompt_path` stable and project-wide.
 2. Keep each execution prompt short and task-specific.
 3. Use `parallel: "yes"` only for tasks that can safely run independently.
-4. Insert `{ "parallel": "no" }` when you need a hard separation between two parallel waves.
-5. Tail individual log files while a batch is running.
+4. Keep each parallel batch at `max_parallel` executions or fewer.
+5. Insert `{ "parallel": "no" }` when you need a hard separation between two parallel waves.
+6. Tail individual log files while a batch is running.
 
 Example:
 
@@ -69,8 +80,8 @@ For each wave run:
 
 - `logs/<wave_ts>/<exec_id>.prompt.md`: exact assembled prompt sent to the CLI
 - `logs/<wave_ts>/<exec_id>.log`: stdout and stderr from the CLI
-- `output/<exec_id>/`: deliverables written by the agent
-- `state.json`: latest tracked worktree path and last status
+- `output/<wave_ts>/<exec_id>/`: deliverables written by the agent
+- `state.json`: latest tracked worktree path, status, exit code, and failure class, including `skipped` when fail-fast prevents later executions from launching
 
 Use the prompt file first when debugging agent behavior. It is the audit record of what the runner actually sent.
 
@@ -78,9 +89,11 @@ Use the prompt file first when debugging agent behavior. It is the audit record 
 
 If one execution fails:
 
-- the rest of the current wave still continues
+- any tasks already running in the same parallel batch still continue
+- later batches are not launched
 - the final process exit code becomes `1`
 - the failed execution is marked `failed` in `state.json`
+- the runner prints a failure class such as `rate_limit`, `auth_error`, `network_error`, `dirty_worktree`, `worktree_error`, or `unknown`
 
 Typical causes:
 
@@ -97,9 +110,17 @@ Recovery steps:
 3. Fix the config, prompt, environment, or repo issue.
 4. Re-run `./run.sh`.
 
+If you only want to validate the wave and inspect current tracked state before rerunning, use:
+
+```bash
+./run.sh --check
+```
+
 ## Worktree Hygiene
 
 The runner intentionally does not remove worktrees.
+
+If a tracked worktree is reused on a later run, it must be clean. If it is dirty, Waverunner fails that execution and asks you to clean or remove the worktree manually before rerunning.
 
 Inspect active worktrees:
 
@@ -126,10 +147,15 @@ Be careful: branch deletion is destructive.
 Refresh an installed runner:
 
 ```bash
-./install.sh --upgrade /path/to/installed/wave-runner
+./install.sh --upgrade /path/to/installed/waverunner
 ```
 
-Current upgrade behavior replaces only `run.sh`. It does not overwrite:
+Current upgrade behavior replaces:
+
+- `run.sh`
+- `howtouse.md`
+
+It does not overwrite:
 
 - `config.json`
 - `logs/`
@@ -144,8 +170,9 @@ Before a real run:
 2. Confirm the CLI is already authenticated.
 3. Confirm `git_dir` points at the intended repository root.
 4. Confirm the file referenced by `master_prompt_path` reflects current project constraints.
-5. Confirm each execution writes to the intended output area.
-6. Run `./run.sh --dry-run` and inspect the batch plan.
+5. Confirm no parallel batch exceeds `max_parallel`.
+6. Confirm each execution writes to the intended output area.
+7. Run `./run.sh --dry-run` and inspect the batch plan.
 
 ## Current Limitations
 
@@ -155,3 +182,4 @@ Before a real run:
 - no worktree cleanup
 - no live multipane viewer
 - no automatic CLI version detection
+- no automatic batch splitting when config exceeds `max_parallel`

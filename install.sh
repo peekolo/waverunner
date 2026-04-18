@@ -133,6 +133,30 @@ render_config() {
     }' "$template_path" > "$target/config.json"
 }
 
+copy_howtouse() {
+  local target="$1"
+  cp "$SCRIPT_DIR/templates/howtouse.md.tpl" "$target/howtouse.md"
+}
+
+relative_path_under_root() {
+  local root="$1"
+  local path="$2"
+  local root_abs
+  local path_abs
+
+  root_abs=$(normalize_path "$root" "$SCRIPT_DIR")
+  path_abs=$(normalize_path "$path" "$SCRIPT_DIR")
+
+  case "$path_abs/" in
+    "$root_abs/"*)
+      printf '%s\n' "${path_abs#"$root_abs"/}"
+      return 0
+      ;;
+  esac
+
+  printf '%s\n' ''
+}
+
 run_upgrade() {
   local target="$1"
 
@@ -143,10 +167,11 @@ run_upgrade() {
 
   mkdir -p "$target"
   cp "$SCRIPT_DIR/src/run.sh" "$target/run.sh"
+  copy_howtouse "$target"
   chmod +x "$target/run.sh"
 
   printf 'Upgraded wave runner at: %s\n' "$target"
-  printf '%s\n' 'Updated: run.sh'
+  printf '%s\n' 'Updated: run.sh, howtouse.md'
 }
 
 prompt_value() {
@@ -256,6 +281,9 @@ main() {
   local cli_choice
   local cli
   local git_dir
+  local howtouse_rel
+  local howtouse_ref
+  local target_rel
 
   check_prereqs
 
@@ -293,6 +321,7 @@ main() {
   cp "$SCRIPT_DIR/src/run.sh" "$target/run.sh"
   chmod +x "$target/run.sh"
   render_config "$cli" "$project_root" "$git_dir" "$target"
+  copy_howtouse "$target"
 
   case "$gitignore_choice" in
     y|Y|yes|YES|Yes)
@@ -315,6 +344,24 @@ Next steps:
   4. Run:
        $target/run.sh --dry-run
        $target/run.sh
+EOF
+
+  howtouse_rel=$(relative_path_under_root "$project_root" "$target/howtouse.md")
+  if [[ -n "$howtouse_rel" ]]; then
+    howtouse_ref="$howtouse_rel"
+  else
+    howtouse_ref="$target/howtouse.md"
+  fi
+
+  target_rel=$(relative_path_under_root "$project_root" "$target")
+  if [[ -z "$target_rel" ]]; then
+    target_rel="$target"
+  fi
+
+  cat <<EOF
+
+Suggested prompt for your project AI agent:
+  Refer to $howtouse_ref and set up Waverunner for this project. Update $target_rel/config.json to match the tasks I give you, create any missing prompt/spec/master-prompt artifacts that config needs, keep the orchestration inside Waverunner instead of adding custom runner scripts to the core repo, and then show me the resulting wave plan.
 EOF
 }
 

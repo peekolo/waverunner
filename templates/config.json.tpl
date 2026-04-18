@@ -4,6 +4,7 @@
   "git_dir": "{{GIT_DIR}}",
   "master_prompt_path": "{{PROJECT_ROOT}}/master_prompt.md",
   "output_base": "./output",
+  "max_parallel": 3,
   "executions": [
     {
       "techspec_path": "{{PROJECT_ROOT}}/specs/SPEC-XX.md",
