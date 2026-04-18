@@ -8,10 +8,12 @@
 ./install.sh
 ```
 
+If you accept the `.gitignore` prompt during install, the installer appends a comment plus the whole wave-runner directory path to `<project_root>/.gitignore`.
+
 2. Edit `config.json`.
-3. Fill in `master_prompt.md`.
-4. Put techspec markdown files in `specs/`.
-5. Put task prompt markdown files in `prompts/`.
+3. Point `master_prompt_path` at your real project-wide prompt file.
+4. Replace the baked-in example execution with your real execution list.
+5. Point each execution at the real techspec and prompt files you want to use.
 6. Inspect the plan:
 
 ```bash
@@ -26,7 +28,7 @@
 
 ## Recommended Workflow
 
-1. Keep `master_prompt.md` stable and project-wide.
+1. Keep the file referenced by `master_prompt_path` stable and project-wide.
 2. Keep each execution prompt short and task-specific.
 3. Use `parallel: "yes"` only for tasks that can safely run independently.
 4. Insert `{ "parallel": "no" }` when you need a hard separation between two parallel waves.
@@ -55,7 +57,7 @@ Example:
 
 Guidance:
 
-- put durable project rules in `master_prompt.md`
+- put durable project rules in the file referenced by `master_prompt_path`
 - put execution-specific instructions in `prompt` or `prompt_path`
 - use `prompt` for short one-off nudges
 - use `prompt_path` for longer structured task instructions
@@ -130,9 +132,6 @@ Refresh an installed runner:
 Current upgrade behavior replaces only `run.sh`. It does not overwrite:
 
 - `config.json`
-- `master_prompt.md`
-- `specs/`
-- `prompts/`
 - `logs/`
 - `output/`
 - `state.json`
@@ -144,7 +143,7 @@ Before a real run:
 1. Confirm `jq`, `git`, and the selected AI CLI are installed.
 2. Confirm the CLI is already authenticated.
 3. Confirm `git_dir` points at the intended repository root.
-4. Confirm `master_prompt.md` reflects current project constraints.
+4. Confirm the file referenced by `master_prompt_path` reflects current project constraints.
 5. Confirm each execution writes to the intended output area.
 6. Run `./run.sh --dry-run` and inspect the batch plan.
 

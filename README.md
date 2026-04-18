@@ -1,80 +1,78 @@
-# ai-wave-runner
+# Waverunner
 
-Minimal Bash orchestrator for launching parallel or sequential AI CLI executions in isolated git worktrees.
+Waverunner is a minimal Bash orchestrator for running repeatable waves of AI CLI work across isolated git worktrees.
 
-Source repo layout:
+It gives you a single `config.json`, turns that into sequential and parallel execution batches, assembles the exact prompt sent to each agent, and keeps per-run logs and state on disk. The goal is simple: make multi-task AI execution less ad hoc without forcing you into a larger platform.
 
-```text
-theexecutors/
-├── install.sh
-├── src/
-│   └── run.sh
-└── templates/
-    ├── config.json.tpl
-    ├── master_prompt.md.tpl
-    └── execution_example.json
-```
+## Why Use It
 
-Installed layout:
+- Run multiple Claude or Codex tasks from one config file.
+- Isolate every execution in its own git worktree.
+- Mix parallel batches with explicit sequential barriers.
+- Keep an audit trail of assembled prompts, logs, outputs, and worktree state.
+- Install a self-contained runner into a project without tying day-to-day use to this source repo.
+
+## What It Installs
+
+Run `install.sh` from this repo once, then operate from the installed target directory.
 
 ```text
 <target>/
 ├── run.sh
 ├── config.json
-├── master_prompt.md
-├── execution_example.json
-├── specs/
-├── prompts/
-├── output/        # auto-created on first run
-├── logs/          # auto-created on first run
-└── state.json     # auto-created on first run
+├── output/        # auto-created on first real run
+├── logs/          # auto-created on first real run
+└── state.json     # auto-created on first real run
 ```
+
+Waverunner does not create or manage `specs/`, `prompts/`, `master_prompt.md`, or example execution files. Your prompt and techspec files stay fully user-owned and can live anywhere in the project.
 
 ## Requirements
 
 - Bash 3.2+
 - `jq`
 - `git`
-- One supported AI CLI installed and authenticated:
+- One supported AI CLI installed and already authenticated:
   - `claude`
   - `codex`
 
-If `jq` or `git` is missing, `install.sh` and `run.sh` exit with code `2` and print a one-line install hint.
+If `jq` or `git` is missing, both `install.sh` and `run.sh` exit with code `2` and print a one-line install hint.
 
 ## Install
 
-Run from the source repo:
+From the source repo:
 
 ```bash
 ./install.sh
 ```
 
-Interactive prompts:
+The installer prompts for:
 
 1. Project root path
 2. Install target path
-3. CLI choice: `claude` or `codex`
-4. Git dir, or blank to reuse project root
+3. Whether to append the install dir to `<project_root>/.gitignore`
+4. CLI choice: `claude` or `codex`
+5. Git dir, or blank to reuse project root
 
-Installer behavior:
+Behavior to know:
 
-- Creates `<target>/specs` and `<target>/prompts`
-- Copies `src/run.sh` to `<target>/run.sh`
-- Renders `<target>/config.json`
-- Copies `<target>/master_prompt.md`
-- Copies `<target>/execution_example.json`
+- The installer keeps asking until the project root exists.
+- The install target defaults to `<project_root>/waverunner`.
+- If the install target already exists, the installer can remove it or let you choose another path.
+- If the install target lives under the project root, the installer can append `/<relative-target>/` to the project `.gitignore` without duplicating the entry.
+- The generated `config.json` contains one baked-in example execution.
 
-Upgrade in place:
+Upgrade an existing installed runner:
 
 ```bash
-./install.sh --upgrade /path/to/installed/wave-runner
+./install.sh --upgrade /path/to/installed/waverunner
 ```
 
-Current `--upgrade` behavior overwrites only `run.sh`.
+Current upgrade behavior overwrites only `run.sh`.
 
-## Config
+## Configure
 
-`run.sh` always reads `config.json` and `master_prompt.md` from its own directory.
+`run.sh` always reads `config.json` from its own directory. All relative paths inside `config.json` are resolved from that installed directory.
 
 Example:
 
@@ -83,21 +81,29 @@ Example:
   "cli": "claude",
   "project_root": "/var/www/my_project",
   "git_dir": "/var/www/my_project",
-  "master_prompt_path": "./master_prompt.md",
+  "master_prompt_path": "/var/www/my_project/master_prompt.md",
   "output_base": "./output",
   "executions": [
     {
-      "techspec_path": "./specs/SPEC-01.md",
-      "prompt_path": "./prompts/SPEC-01.md",
+      "techspec_path": "/var/www/my_project/specs/SPEC-01.md",
+      "prompt_path": "/var/www/my_project/prompts/SPEC-01.md",
       "parallel": "yes",
       "model": "claude-sonnet-4-6",
       "effort": "high"
     },
     {
-      "techspec_path": "./specs/SPEC-02.md",
+      "techspec_path": "/var/www/my_project/specs/SPEC-02.md",
       "prompt": "Focus on failure cases first.",
+      "parallel": "yes",
+      "model": "claude-sonnet-4-6",
+      "effort": "high"
+    },
+    { "parallel": "no" },
+    {
+      "techspec_path": "/var/www/my_project/specs/SPEC-03.md",
+      "prompt_path": "/var/www/my_project/prompts/SPEC-03.md",
       "parallel": "no",
-      "model": "claude-opus-4-7",
+      "model": "claude-sonnet-4-6",
       "effort": "high"
     }
   ]
@@ -107,10 +113,10 @@ Example:
 Top-level fields:
 
 - `cli`: `claude` or `codex`
-- `project_root`: sanity reference for the target repo
+- `project_root`: validated sanity reference for the target project
 - `git_dir`: repo root used for `git worktree`
-- `master_prompt_path`: relative to installed dir or absolute
-- `output_base`: relative to installed dir or absolute
+- `master_prompt_path`: project-wide prompt file
+- `output_base`: base directory for per-execution outputs
 - `executions`: ordered execution list
 
 Per-execution fields:
@@ -129,64 +135,83 @@ Barrier entry:
 
 That entry runs nothing. It only flushes the current parallel batch.
 
-## Execution Model
+## Run
 
-Each non-empty execution gets an `exec_id`:
+Inspect the resolved plan first:
 
-```text
-<NN>_<sanitized_techspec_basename>
+```bash
+./run.sh --dry-run
 ```
 
-Example:
+Launch the wave:
 
-```text
-01_SPEC-03_autocorr
+```bash
+./run.sh
 ```
 
-Batching behavior:
+Before any execution starts, `run.sh` validates:
 
-- consecutive `parallel: "yes"` entries are grouped into one batch
-- `parallel: "no"` runs alone
-- `{ "parallel": "no" }` acts as a batch barrier
-- if one task fails, later batches still run
-- final exit code is `1` if any task failed
+- `config.json` exists and is valid JSON
+- required top-level fields are present
+- `project_root`, `git_dir`, and `master_prompt_path` resolve correctly
+- every referenced `techspec_path` and `prompt_path` exists
+- `output_base` can be created or written
 
-## Worktrees
+Dry-run output shows the batch plan, including:
 
-For each execution, `run.sh` either reuses a tracked worktree from `state.json` or creates a new one under:
+- resolved `exec_id`
+- model
+- effort for `claude`
+- prompt source type
+- absolute techspec path
+- planned worktree path
+- resolved output directory
 
-```text
-<git_dir>/.worktrees/<exec_id>
+Real execution:
+
+- creates `logs/<wave_ts>/`
+- creates `output/<exec_id>/`
+- creates or reuses git worktrees under `<git_dir>/.worktrees/`
+- updates `state.json`
+- prints `DONE` or `FAILED` per execution
+- exits `1` if any execution failed
+
+## Execution Flow
+
+```mermaid
+flowchart TD
+    A[Edit config.json] --> B[./run.sh --dry-run]
+    B --> C[Validate config and all referenced paths]
+    C --> D[Build execution batches]
+    D --> E[Resolve or create worktrees]
+    E --> F[Assemble prompt files]
+    F --> G[Run Claude or Codex]
+    G --> H[Write logs, output, and state]
+    H --> I{More batches?}
+    I -->|Yes| E
+    I -->|No| J[Print summary and exit]
 ```
 
-Branch name matches the worktree name. If the intended path already exists outside tracked state, the runner appends a timestamp suffix and retries.
+Batching rules:
 
-`state.json` is created automatically on first execution:
+- Consecutive `parallel: "yes"` entries run together in one batch.
+- `parallel: "no"` runs alone.
+- `{ "parallel": "no" }` acts as a barrier between parallel waves.
+- Later batches still run even if an earlier execution failed.
+- Final process exit code is `1` if any execution failed.
 
-```json
-{
-  "executions": {
-    "01_SPEC-01": {
-      "worktree_path": "/repo/.worktrees/01_SPEC-01",
-      "branch": "01_SPEC-01",
-      "last_run_ts": "20260418_143022",
-      "last_status": "done"
-    }
-  }
-}
-```
+## Prompt and Output Model
 
-## Prompt Assembly
-
-For each execution, the runner writes:
+For each execution, Waverunner writes:
 
 - `logs/<wave_ts>/<exec_id>.prompt.md`
 - `logs/<wave_ts>/<exec_id>.log`
+- `output/<exec_id>/`
 
 Prompt shape:
 
 ```markdown
-<master_prompt.md>
+<contents of master_prompt_path>
 
 ---
 
@@ -203,67 +228,49 @@ Read your techspec at: <absolute techspec path>
 Write all deliverables to: <absolute output path>/
 ```
 
-The techspec is referenced by absolute path, not inlined.
+The techspec is referenced by absolute path, not inlined into the prompt.
 
-## Run
+## Worktree Model
 
-Dry run:
+Each non-empty execution gets an `exec_id` in this form:
 
-```bash
-./run.sh --dry-run
+```text
+<NN>_<sanitized_techspec_basename>
 ```
 
-Execute:
+Example:
 
-```bash
-./run.sh
+```text
+01_SPEC-03_autocorr
 ```
 
-Dry-run output includes:
+For each execution, `run.sh` either:
 
-- resolved `exec_id`
-- model
-- effort for `claude`
-- prompt source type
-- absolute techspec path
-- intended worktree path
-- resolved output directory
+- reuses a tracked worktree from `state.json` if it still exists, or
+- creates a new worktree at `<git_dir>/.worktrees/<exec_id>`
 
-Normal execution:
+The branch name matches the worktree name. If a matching path already exists outside tracked state, Waverunner appends a timestamp suffix and retries.
 
-- creates `logs/<timestamp>/`
-- creates `output/<exec_id>/`
-- updates `state.json`
-- prints `DONE` or `FAILED` per execution
-- prints a final summary
+## Who This Is For
 
-Exit codes:
+- Teams or solo operators running repeatable spec-driven AI tasks against one repo
+- People who want cheap orchestration without building a queueing system
+- Workflows where prompt auditability and worktree isolation matter
+- Projects that already organize work around techspecs, task prompts, and output directories
 
-- `0`: all executions succeeded
-- `1`: one or more executions failed
-- `2`: missing prereq or invalid config
-- `130`: interrupted
+## When Not To Use It
 
-## CLI Assumptions
+- You need DAG scheduling, retries, budgets, or centralized coordination
+- You want a live UI, dashboards, or multi-user job control
+- You only run one-off interactive AI CLI sessions
+- You do not want persistent worktrees to accumulate over time
 
-Current dispatch in `run.sh` is:
+## Current Limitations
 
-```bash
-claude -p --model "$MODEL" --effort "$EFFORT" --permission-mode auto
-codex -q --full-auto -m "$MODEL"
-```
+- No retries
+- No DAG scheduling
+- No automatic worktree cleanup
+- No live viewer for parallel runs
+- No CLI version detection
 
-These flags should be verified against the installed CLI versions in the target environment before relying on unattended runs. The runner assumes:
-
-- `claude` accepts stdin for prompt input in `-p` mode
-- `codex` accepts stdin for prompt input in `-q --full-auto` mode
-- both CLIs are already authenticated
-
-## Notes
-
-- `project_root` is validated but agents run inside the resolved worktree path
-- logs are written to files only, so parallel output does not interleave on stdout
-- `specs/` and `prompts/` are conventions; absolute or alternate relative paths are allowed in `config.json`
-- worktree cleanup is manual; this project does not remove old worktrees
-
-For day-to-day usage, see [RUNBOOK.md](./RUNBOOK.md).
+For day-to-day operating guidance, see [RUNBOOK.md](./RUNBOOK.md).

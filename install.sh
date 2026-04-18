@@ -46,8 +46,62 @@ check_prereqs() {
   require_cmd git
 }
 
-escape_sed_replacement() {
-  printf '%s' "$1" | sed -e 's/[\/&]/\\&/g'
+normalize_path() {
+  local input="$1"
+  local base="$2"
+  local combined
+  local old_ifs
+  local part
+  local joined
+  local i
+  local -a pieces
+  local -a out
+
+  if [[ "$input" == /* ]]; then
+    combined="$input"
+  else
+    combined="$base/$input"
+  fi
+
+  old_ifs=$IFS
+  IFS='/'
+  set -f
+  pieces=($combined)
+  set +f
+  IFS=$old_ifs
+
+  out=()
+  for part in "${pieces[@]}"; do
+    if [[ -z "$part" || "$part" == "." ]]; then
+      continue
+    fi
+    if [[ "$part" == ".." ]]; then
+      if [[ ${#out[@]} -gt 0 ]]; then
+        unset 'out[${#out[@]}-1]'
+      fi
+      continue
+    fi
+    out+=("$part")
+  done
+
+  joined=""
+  for ((i=0; i<${#out[@]}; i++)); do
+    if [[ $i -eq 0 ]]; then
+      joined="${out[$i]}"
+    else
+      joined="$joined/${out[$i]}"
+    fi
+  done
+
+  if [[ -n "$joined" ]]; then
+    printf '/%s\n' "$joined"
+  else
+    printf '%s\n' '/'
+  fi
+}
+
+escape_awk_replacement() {
+  printf '%s' "$1" | sed -e 's/[\\&]/\\&/g'
 }
 
 render_config() {
@@ -56,12 +110,27 @@ render_config() {
   local git_dir="$3"
   local target="$4"
   local template_path="$SCRIPT_DIR/templates/config.json.tpl"
+  local example_model_block
 
-  sed \
-    -e "s/{{CLI}}/$(escape_sed_replacement "$cli")/g" \
-    -e "s/{{PROJECT_ROOT}}/$(escape_sed_replacement "$project_root")/g" \
-    -e "s/{{GIT_DIR}}/$(escape_sed_replacement "$git_dir")/g" \
-    "$template_path" > "$target/config.json"
+  if [[ "$cli" == "claude" ]]; then
+    example_model_block='      "model": "claude-sonnet-4-6",
+      "effort": "high"'
+  else
+    example_model_block='      "model": "codex-mini-latest"'
+  fi
+
+  awk \
+    -v cli="$(escape_awk_replacement "$cli")" \
+    -v project_root="$(escape_awk_replacement "$project_root")" \
+    -v git_dir="$(escape_awk_replacement "$git_dir")" \
+    -v example_model_block="$(escape_awk_replacement "$example_model_block")" \
+    '{
+      gsub(/\{\{CLI\}\}/, cli)
+      gsub(/\{\{PROJECT_ROOT\}\}/, project_root)
+      gsub(/\{\{GIT_DIR\}\}/, git_dir)
+      gsub(/\{\{EXAMPLE_MODEL_BLOCK\}\}/, example_model_block)
+      print
+    }' "$template_path" > "$target/config.json"
 }
 
 run_upgrade() {
@@ -90,9 +159,100 @@ prompt_value() {
   printf '%s' "$value"
 }
 
+prompt_existing_project_root() {
+  local value
+
+  while :; do
+    value=$(prompt_value '[1/5] Project root path?')
+    if [[ -d "$value" ]]; then
+      printf '%s' "$value"
+      return 0
+    fi
+    printf '%s\n' "project root does not exist: $value" >&2
+  done
+}
+
+prompt_install_target() {
+  local default_target="$1"
+  local value
+  local remove_choice
+
+  while :; do
+    value=$(prompt_value "[2/5] Install wave runner at? (blank = $default_target)")
+    if [[ -z "$value" ]]; then
+      value="$default_target"
+    fi
+
+    if [[ ! -e "$value" ]]; then
+      printf '%s' "$value"
+      return 0
+    fi
+
+    printf '%s\n' "install target already exists: $value" >&2
+    remove_choice=$(prompt_value "      Remove it with rm -rf and continue? (y/n)")
+    case "$remove_choice" in
+      y|Y|yes|YES|Yes)
+        rm -rf "$value"
+        printf '%s' "$value"
+        return 0
+        ;;
+      n|N|no|NO|No|'')
+        printf '%s\n' 'choose another installation directory' >&2
+        ;;
+      *)
+        printf '%s\n' "unrecognized choice \"$remove_choice\"; choose another installation directory" >&2
+        ;;
+    esac
+  done
+}
+
+append_gitignore_entry() {
+  local project_root="$1"
+  local target="$2"
+  local gitignore_path="$project_root/.gitignore"
+  local project_root_abs
+  local target_abs
+  local relative_target
+  local entry
+
+  project_root_abs=$(normalize_path "$project_root" "$SCRIPT_DIR")
+  target_abs=$(normalize_path "$target" "$SCRIPT_DIR")
+
+  case "$target_abs/" in
+    "$project_root_abs/"*)
+      relative_target=${target_abs#"$project_root_abs"/}
+      ;;
+    *)
+      printf '%s\n' "warning: install target is outside project root; skipping .gitignore update: $target_abs" >&2
+      return 0
+      ;;
+  esac
+
+  if [[ -z "$relative_target" || "$relative_target" == "$target_abs" ]]; then
+    printf '%s\n' "warning: could not derive a relative .gitignore path for: $target_abs" >&2
+    return 0
+  fi
+
+  entry="/$relative_target/"
+
+  if [[ -f "$gitignore_path" ]] && grep -F -x "$entry" "$gitignore_path" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  {
+    if [[ -f "$gitignore_path" ]]; then
+      printf '\n'
+    fi
+    printf '%s\n' '# ai-wave-runner install'
+    printf '%s\n' "$entry"
+  } >> "$gitignore_path"
+}
+
 main() {
   local project_root
   local target
+  local default_target
+  local gitignore_choice
   local cli_choice
   local cli
   local git_dir
@@ -109,10 +269,12 @@ main() {
     exit 2
   fi
 
-  project_root=$(prompt_value '[1/4] Project root path?')
-  target=$(prompt_value '[2/4] Install wave runner at?')
-  cli_choice=$(prompt_value '[3/4] Which CLI? (1) claude  (2) codex')
-  git_dir=$(prompt_value '[4/4] Git dir? (blank = same as project root)')
+  project_root=$(prompt_existing_project_root)
+  default_target="$project_root/waverunner"
+  target=$(prompt_install_target "$default_target")
+  gitignore_choice=$(prompt_value '[3/5] Add the wave runner directory to the project .gitignore? (y/n)')
+  cli_choice=$(prompt_value '[4/5] Which CLI? (1) claude  (2) codex')
+  git_dir=$(prompt_value '[5/5] Git dir? (blank = same as project root)')
 
   case "$cli_choice" in
     1) cli="claude" ;;
@@ -123,29 +285,33 @@ main() {
       ;;
   esac
 
-  if [[ -z "$project_root" || -z "$target" ]]; then
-    printf '%s\n' 'project root and target path are required' >&2
-    exit 2
-  fi
-
   if [[ -z "$git_dir" ]]; then
     git_dir="$project_root"
   fi
 
-  mkdir -p "$target/specs" "$target/prompts"
+  mkdir -p "$target"
   cp "$SCRIPT_DIR/src/run.sh" "$target/run.sh"
   chmod +x "$target/run.sh"
   render_config "$cli" "$project_root" "$git_dir" "$target"
-  cp "$SCRIPT_DIR/templates/master_prompt.md.tpl" "$target/master_prompt.md"
-  cp "$SCRIPT_DIR/templates/execution_example.json" "$target/execution_example.json"
+
+  case "$gitignore_choice" in
+    y|Y|yes|YES|Yes)
+      append_gitignore_entry "$project_root" "$target"
+      ;;
+    n|N|no|NO|No|'')
+      ;;
+    *)
+      printf '%s\n' "warning: unrecognized .gitignore choice \"$gitignore_choice\"; skipping .gitignore update" >&2
+      ;;
+  esac
 
   cat <<EOF
 Done. Wave runner installed at: $target
 
 Next steps:
-  1. Edit config.json         — verify paths, fill executions[]
-  2. Fill in master_prompt.md — project-wide context for every executor
-  3. Drop techspec MDs in specs/  and prompt MDs in prompts/
+  1. Edit config.json         — verify paths and replace the example execution
+  2. Point master_prompt_path at your project-wide prompt file
+  3. Point executions[] at your techspec and prompt files
   4. Run:
        $target/run.sh --dry-run
        $target/run.sh

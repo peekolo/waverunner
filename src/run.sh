@@ -267,6 +267,21 @@ validate_top_level_file() {
   fi
 }
 
+validate_directory_path() {
+  local path="$1"
+  local label="$2"
+  if [[ ! -d "$path" ]]; then
+    die "$label does not exist: $path" 2
+  fi
+}
+
+validate_or_create_output_base() {
+  if mkdir -p "$OUTPUT_BASE" >/dev/null 2>&1; then
+    return 0
+  fi
+  die "output_base is not writable or could not be created: $OUTPUT_BASE" 2
+}
+
 load_config() {
   local parse_ts
   local codex_effort_warned=0
@@ -309,10 +324,11 @@ load_config() {
   MASTER_PROMPT_PATH=$(normalize_path "$MASTER_PROMPT_PATH" "$SCRIPT_DIR")
   OUTPUT_BASE=$(normalize_path "$OUTPUT_BASE" "$SCRIPT_DIR")
 
-  [[ -d "$PROJECT_ROOT" ]] || die "project_root does not exist: $PROJECT_ROOT" 2
-  [[ -d "$GIT_DIR" ]] || die "git_dir does not exist: $GIT_DIR" 2
+  validate_directory_path "$PROJECT_ROOT" 'project_root'
+  validate_directory_path "$GIT_DIR" 'git_dir'
   git -C "$GIT_DIR" rev-parse --show-toplevel >/dev/null 2>&1 || die "git_dir is not a git repository: $GIT_DIR" 2
   validate_top_level_file "$MASTER_PROMPT_PATH" 'master prompt'
+  validate_or_create_output_base
 
   jq -e '.executions | type == "array"' "$CONFIG_PATH" >/dev/null 2>&1 || die 'config.json field executions must be an array' 2
   EXEC_COUNT=$(jq '.executions | length' "$CONFIG_PATH") || die 'config.json field executions must be an array' 2
