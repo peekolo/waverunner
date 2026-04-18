@@ -36,6 +36,13 @@ You can also validate the config and inspect tracked execution state without lau
 ./run.sh
 ```
 
+The installed adapters currently run in safe unattended mode:
+
+- `claude`: `-p --permission-mode dontAsk`
+- `codex`: `exec -a never -s workspace-write`
+
+That means the wave should not pause for approval prompts, but a task can still fail if the CLI refuses an operation under its permission model or sandbox.
+
 ## Recommended Workflow
 
 1. Keep the file referenced by `master_prompt_path` stable and project-wide.
@@ -93,7 +100,7 @@ If one execution fails:
 - later batches are not launched
 - the final process exit code becomes `1`
 - the failed execution is marked `failed` in `state.json`
-- the runner prints a failure class such as `rate_limit`, `auth_error`, `network_error`, `dirty_worktree`, `worktree_error`, or `unknown`
+- the runner prints a failure class such as `rate_limit`, `auth_error`, `network_error`, `permission_denied`, `dirty_worktree`, `worktree_error`, or `unknown`
 
 Typical causes:
 
@@ -154,6 +161,7 @@ Current upgrade behavior replaces:
 
 - `run.sh`
 - `howtouse.md`
+- `adapters/<cli>.sh`
 
 It does not overwrite:
 

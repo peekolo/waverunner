@@ -6,6 +6,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 CONFIG_PATH="$SCRIPT_DIR/config.json"
 STATE_PATH="$SCRIPT_DIR/state.json"
 LOGS_BASE="$SCRIPT_DIR/logs"
+ADAPTERS_DIR="$SCRIPT_DIR/adapters"
 LOCK_DIR="$SCRIPT_DIR/.run.lock"
 LOCK_INFO_PATH="$LOCK_DIR/info"
 
@@ -94,6 +95,22 @@ require_cmd() {
     install_hint "$1"
     exit 2
   fi
+}
+
+load_adapter() {
+  local adapter_path="$ADAPTERS_DIR/$CLI.sh"
+
+  if [[ ! -f "$adapter_path" ]]; then
+    die "adapter not found for cli=$CLI: $adapter_path" 2
+  fi
+
+  # shellcheck disable=SC1090
+  . "$adapter_path"
+
+  command -v adapter_require_cli >/dev/null 2>&1 || die "adapter missing required function: adapter_require_cli" 2
+  command -v adapter_validate_execution >/dev/null 2>&1 || die "adapter missing required function: adapter_validate_execution" 2
+  command -v adapter_print_execution_plan >/dev/null 2>&1 || die "adapter missing required function: adapter_print_execution_plan" 2
+  command -v adapter_run_cli >/dev/null 2>&1 || die "adapter missing required function: adapter_run_cli" 2
 }
 
 check_prereqs() {
@@ -354,7 +371,6 @@ validate_or_create_output_base() {
 
 load_config() {
   local parse_ts
-  local codex_effort_warned=0
   local parallel_streak=0
   local i
   local entry_json
@@ -393,7 +409,8 @@ load_config() {
   if ! [[ "$MAX_PARALLEL" =~ ^[1-9][0-9]*$ ]]; then
     die "config.json field max_parallel must be a positive integer; got: $MAX_PARALLEL" 2
   fi
-  require_cmd "$CLI"
+  load_adapter
+  adapter_require_cli
 
   PROJECT_ROOT=$(normalize_path "$PROJECT_ROOT" "$SCRIPT_DIR")
   GIT_DIR=$(normalize_path "$GIT_DIR" "$SCRIPT_DIR")
@@ -445,13 +462,6 @@ load_config() {
     if [[ -z "$prompt_inline" && -z "$prompt_path_raw" ]]; then
       die "executions[$i] requires at least one of prompt or prompt_path" 2
     fi
-    if [[ "$CLI" == "claude" && -z "$effort" ]]; then
-      die "executions[$i] missing required field: effort for cli=claude" 2
-    fi
-    if [[ "$CLI" == "codex" && -n "$effort" && $codex_effort_warned -eq 0 ]]; then
-      say_err 'warning: executions[].effort is ignored when cli=codex'
-      codex_effort_warned=1
-    fi
 
     techspec_abs=$(normalize_path "$techspec_raw" "$SCRIPT_DIR")
     [[ -f "$techspec_abs" ]] || die "techspec not found for executions[$i]: $techspec_abs" 2
@@ -474,6 +484,7 @@ load_config() {
     EXEC_MODEL[$i]="$model"
     EXEC_EFFORT[$i]="$effort"
     EXEC_ID[$i]="$(unique_exec_id "$base_exec_id" "$parse_ts")"
+    adapter_validate_execution "$i"
 
     if [[ "$parallel" == "yes" ]]; then
       parallel_streak=$((parallel_streak + 1))
@@ -610,9 +621,7 @@ print_execution_plan() {
 
   printf '  - exec_id: %s\n' "${EXEC_ID[$idx]}"
   printf '    model: %s\n' "${EXEC_MODEL[$idx]}"
-  if [[ "$CLI" == "claude" ]]; then
-    printf '    effort: %s\n' "${EXEC_EFFORT[$idx]}"
-  fi
+  adapter_print_execution_plan "$idx"
   if [[ -n "${EXEC_PROMPT_INLINE[$idx]}" ]]; then
     printf '    prompt: inline\n'
   fi
@@ -648,6 +657,11 @@ classify_task_failure() {
     return 0
   fi
 
+  if grep -E -i 'approval|requires approval|ask for approval|permission prompt|cannot ask|dontask|sandbox denied|denied by sandbox|blocked by sandbox|blocked by permission|disallowed tool|tool denied|cannot use tool|operation not permitted' "$log_file" >/dev/null 2>&1; then
+    printf '%s\n' 'permission_denied'
+    return 0
+  fi
+
   if grep -E -i 'network|timed out|timeout|connection reset|connection refused|temporary failure|dns|enotfound|econn|tls|ssl' "$log_file" >/dev/null 2>&1; then
     printf '%s\n' 'network_error'
     return 0
@@ -661,43 +675,15 @@ classify_task_failure() {
   printf '%s\n' 'unknown'
 }
 
-run_cli() {
-  local prompt_file="$1"
-  local log_file="$2"
-  local worktree_path="$3"
-  local model="$4"
-  local effort="$5"
-
-  (
-    cd "$worktree_path" || exit 1
-    case "$CLI" in
-      claude)
-        claude -p \
-          --model "$model" \
-          --effort "$effort" \
-          --permission-mode auto \
-          < "$prompt_file" > "$log_file" 2>&1
-        ;;
-      codex)
-        codex -q --full-auto -m "$model" \
-          < "$prompt_file" > "$log_file" 2>&1
-        ;;
-      *)
-        say_err "unknown cli: $CLI"
-        exit 2
-        ;;
-    esac
-  )
-}
-
 run_task_async() {
   local idx="$1"
-  run_cli \
+  adapter_run_cli \
     "${EXEC_PROMPT_FILE[$idx]}" \
     "${EXEC_LOG_PATH[$idx]}" \
     "${EXEC_WORKTREE_PATH[$idx]}" \
     "${EXEC_MODEL[$idx]}" \
-    "${EXEC_EFFORT[$idx]}"
+    "${EXEC_EFFORT[$idx]}" \
+    "${EXEC_OUTPUT_DIR[$idx]}"
 }
 
 mark_running() {

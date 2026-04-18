@@ -138,6 +138,14 @@ copy_howtouse() {
   cp "$SCRIPT_DIR/templates/howtouse.md.tpl" "$target/howtouse.md"
 }
 
+copy_adapter() {
+  local cli="$1"
+  local target="$2"
+
+  mkdir -p "$target/adapters"
+  cp "$SCRIPT_DIR/src/adapters/$cli.sh" "$target/adapters/$cli.sh"
+}
+
 relative_path_under_root() {
   local root="$1"
   local path="$2"
@@ -159,19 +167,34 @@ relative_path_under_root() {
 
 run_upgrade() {
   local target="$1"
+  local config_path
+  local cli
 
   if [[ -z "$target" ]]; then
     usage
     exit 2
   fi
 
+  config_path="$target/config.json"
+  if [[ ! -f "$config_path" ]]; then
+    printf '%s\n' "upgrade target is missing config.json: $config_path" >&2
+    exit 2
+  fi
+
+  cli=$(jq -r '.cli // empty' "$config_path")
+  if [[ "$cli" != "claude" && "$cli" != "codex" ]]; then
+    printf '%s\n' "upgrade target config.json has unsupported or missing cli: $cli" >&2
+    exit 2
+  fi
+
   mkdir -p "$target"
   cp "$SCRIPT_DIR/src/run.sh" "$target/run.sh"
   copy_howtouse "$target"
+  copy_adapter "$cli" "$target"
   chmod +x "$target/run.sh"
 
   printf 'Upgraded wave runner at: %s\n' "$target"
-  printf '%s\n' 'Updated: run.sh, howtouse.md'
+  printf '%s\n' "Updated: run.sh, howtouse.md, adapters/$cli.sh"
 }
 
 prompt_value() {
@@ -322,6 +345,7 @@ main() {
   chmod +x "$target/run.sh"
   render_config "$cli" "$project_root" "$git_dir" "$target"
   copy_howtouse "$target"
+  copy_adapter "$cli" "$target"
 
   case "$gitignore_choice" in
     y|Y|yes|YES|Yes)

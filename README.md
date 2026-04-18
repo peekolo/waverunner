@@ -39,12 +39,14 @@ Run `install.sh` from this repo once, then operate from the installed target dir
 ├── run.sh
 ├── config.json
 ├── howtouse.md
+├── adapters/
+│   └── <cli>.sh
 ├── output/        # auto-created on first real run
 ├── logs/          # auto-created on first real run
 └── state.json     # auto-created on first real run
 ```
 
-Waverunner copies a `howtouse.md` guide for humans or AI agents, but it does not create or manage `specs/`, `prompts/`, or `master_prompt.md`. Your prompt and techspec files stay fully user-owned and can live anywhere in the project.
+Waverunner installs one shared runner plus the selected CLI adapter. It copies a `howtouse.md` guide for humans or AI agents, but it does not create or manage `specs/`, `prompts/`, or `master_prompt.md`. Your prompt and techspec files stay fully user-owned and can live anywhere in the project.
 
 ## Requirements
 
@@ -88,7 +90,7 @@ Upgrade an existing installed runner:
 ./install.sh --upgrade /path/to/installed/waverunner
 ```
 
-Current upgrade behavior overwrites `run.sh` and `howtouse.md`.
+Current upgrade behavior overwrites `run.sh`, `howtouse.md`, and the selected adapter file.
 
 ## Configure
 
@@ -215,6 +217,9 @@ Real execution:
 - creates or reuses git worktrees under `<git_dir>/.worktrees/`
 - refuses to reuse a tracked worktree if it is dirty
 - acquires a run lock so only one real wave runs from an install directory at a time
+- runs the selected CLI in safe unattended mode
+  - `claude`: `-p --permission-mode dontAsk`
+  - `codex`: `exec -a never -s workspace-write`
 - updates `state.json`
 - prints `DONE` or `FAILED (<failure_class>)` per execution when a task fails
 - records `skipped` in `state.json` for executions not launched because fail-fast stopped later batches
@@ -275,6 +280,8 @@ Write all deliverables to: <absolute output path>/
 ```
 
 The techspec is referenced by absolute path, not inlined into the prompt.
+
+In safe unattended mode, an execution can fail because the CLI refuses an operation under its sandbox or permission policy. Those failures should now classify as `permission_denied` instead of collapsing into `unknown`.
 
 ## Worktree Model
 
