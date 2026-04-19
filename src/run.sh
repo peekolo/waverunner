@@ -727,6 +727,11 @@ classify_task_failure() {
     return 0
   fi
 
+  if [[ "$exit_code" == "124" ]]; then
+    printf '%s\n' 'timeout'
+    return 0
+  fi
+
   if [[ ! -f "$log_file" ]]; then
     printf '%s\n' 'unknown'
     return 0
@@ -844,11 +849,15 @@ run_batch() {
   local failure_class
   local batch_failed=0
   local resume_status
+  local batch_start
+  local heartbeat_pid
 
   batch_indices=("$@")
   batch_pids=()
   launched_indices=()
   CHILDREN=()
+  heartbeat_pid=0
+  batch_start=$(date +%s)
 
   for idx in "${batch_indices[@]}"; do
     if ! execution_should_run "$idx"; then
@@ -916,6 +925,24 @@ run_batch() {
     launched_indices+=("$idx")
   done
 
+  if [[ ${#batch_pids[@]} -gt 0 ]]; then
+    (
+      sleep 120
+      while true; do
+        running=()
+        for ((j=0; j<${#batch_pids[@]}; j++)); do
+          kill -0 "${batch_pids[$j]}" 2>/dev/null && running+=("${EXEC_ID[${launched_indices[$j]}]}")
+        done
+        [[ ${#running[@]} -gt 0 ]] || break
+        elapsed=$(( $(date +%s) - batch_start ))
+        ui_info "still running (${elapsed}s): ${running[*]}"
+        sleep 600
+      done
+    ) &
+    heartbeat_pid=$!
+    CHILDREN+=("$heartbeat_pid")
+  fi
+
   for ((i=0; i<${#batch_pids[@]}; i++)); do
     pid="${batch_pids[$i]}"
     idx="${launched_indices[$i]}"
@@ -945,6 +972,11 @@ run_batch() {
       ui_status_line 'FAILED' "${EXEC_ID[$idx]}" "$failure_class | log=${EXEC_LOG_PATH[$idx]}"
     fi
   done
+
+  if [[ $heartbeat_pid -ne 0 ]]; then
+    kill "$heartbeat_pid" 2>/dev/null || true
+    wait "$heartbeat_pid" 2>/dev/null || true
+  fi
 
   CHILDREN=()
 
