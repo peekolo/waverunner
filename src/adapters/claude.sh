@@ -18,10 +18,10 @@ adapter_validate_execution() {
 
 adapter_print_execution_plan() {
   local idx="$1"
-  printf '    effort: %s\n' "${EXEC_EFFORT[$idx]}"
-  printf '    tools: %s\n' "$CLAUDE_ALLOWED_TOOLS"
-  printf '    max_turns: %s\n' "$CLAUDE_MAX_TURNS"
-  printf '%s\n' '    mode: dangerous_unattended (dangerously-skip-permissions)'
+  plan_field 'effort' "${EXEC_EFFORT[$idx]}"
+  plan_field 'tools' "$CLAUDE_ALLOWED_TOOLS"
+  plan_field 'max_turns' "$CLAUDE_MAX_TURNS"
+  plan_field 'mode' 'dangerous_unattended (dangerously-skip-permissions)'
 }
 
 adapter_run_cli() {

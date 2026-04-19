@@ -3,6 +3,9 @@
 set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+. "$SCRIPT_DIR/ui.sh"
+ui_init
+
 CONFIG_PATH="$SCRIPT_DIR/config.json"
 STATE_PATH="$SCRIPT_DIR/state.json"
 LOGS_BASE="$SCRIPT_DIR/logs"
@@ -59,16 +62,24 @@ EOF
 }
 
 say_err() {
-  printf '%s\n' "$*" >&2
+  ui_error "$*"
 }
 
 say() {
-  printf '%s\n' "$*"
+  ui_info "$*"
 }
 
 die() {
   say_err "$1"
   exit "${2:-2}"
+}
+
+plan_header() {
+  printf '  - %s%s%s %s\n' "${UI_BOLD}" 'exec_id:' "${UI_RESET}" "$1"
+}
+
+plan_field() {
+  printf '    %s%-15s%s %s\n' "${UI_DIM}" "$1" "${UI_RESET}" "$2"
 }
 
 install_hint() {
@@ -693,18 +704,18 @@ print_execution_plan() {
 
   resolve_worktree_plan "$idx"
 
-  printf '  - exec_id: %s\n' "${EXEC_ID[$idx]}"
-  printf '    model: %s\n' "${EXEC_MODEL[$idx]}"
+  plan_header "${EXEC_ID[$idx]}"
+  plan_field 'model' "${EXEC_MODEL[$idx]}"
   adapter_print_execution_plan "$idx"
   if [[ -n "${EXEC_PROMPT_INLINE[$idx]}" ]]; then
-    printf '    prompt: inline\n'
+    plan_field 'prompt' 'inline'
   fi
   if [[ -n "${EXEC_PROMPT_PATH[$idx]}" ]]; then
-    printf '    prompt_path: %s\n' "${EXEC_PROMPT_PATH[$idx]}"
+    plan_field 'prompt_path' "${EXEC_PROMPT_PATH[$idx]}"
   fi
-  printf '    techspec: %s\n' "${EXEC_TECHSPEC_PATH[$idx]}"
-  printf '    worktree: %s\n' "${EXEC_WORKTREE_PATH[$idx]}"
-  printf '    output_dir: %s/%s/\n' "$OUTPUT_WAVE_DIR" "${EXEC_ID[$idx]}"
+  plan_field 'techspec' "${EXEC_TECHSPEC_PATH[$idx]}"
+  plan_field 'worktree' "${EXEC_WORKTREE_PATH[$idx]}"
+  plan_field 'output_dir' "$OUTPUT_WAVE_DIR/${EXEC_ID[$idx]}/"
 }
 
 classify_task_failure() {
@@ -842,7 +853,7 @@ run_batch() {
   for idx in "${batch_indices[@]}"; do
     if ! execution_should_run "$idx"; then
       DONE_COUNT=$((DONE_COUNT + 1))
-      printf '%s: SKIPPED (already done in matching prior run)\n' "${EXEC_ID[$idx]}"
+      ui_status_line 'SKIPPED' "${EXEC_ID[$idx]}" 'already done in matching prior run'
       continue
     fi
 
@@ -864,7 +875,7 @@ run_batch() {
       EXEC_FAILURE_CLASS[$idx]="$failure_class"
       EXEC_EXIT_CODE[$idx]=''
       mark_finished "$idx" 'failed' "$failure_class" ''
-      printf '%s: FAILED (%s) | log=%s\n' "${EXEC_ID[$idx]}" "$failure_class" "${EXEC_LOG_PATH[$idx]}"
+      ui_status_line 'FAILED' "${EXEC_ID[$idx]}" "$failure_class | log=${EXEC_LOG_PATH[$idx]}"
       batch_failed=1
       ANY_FAILED=1
       FAILED_COUNT=$((FAILED_COUNT + 1))
@@ -881,7 +892,7 @@ run_batch() {
       EXEC_FAILURE_CLASS[$idx]="$failure_class"
       EXEC_EXIT_CODE[$idx]=''
       mark_finished "$idx" 'failed' "$failure_class" ''
-      printf '%s: FAILED (%s) | log=%s\n' "${EXEC_ID[$idx]}" "$failure_class" "${EXEC_LOG_PATH[$idx]}"
+      ui_status_line 'FAILED' "${EXEC_ID[$idx]}" "$failure_class | log=${EXEC_LOG_PATH[$idx]}"
       batch_failed=1
       ANY_FAILED=1
       FAILED_COUNT=$((FAILED_COUNT + 1))
@@ -892,11 +903,11 @@ run_batch() {
       resume_status=$(execution_resume_status "$idx")
       if [[ "$resume_status" == "stale_running" ]]; then
         mark_stale_running_resumed "$idx"
-        say "Resuming ${EXEC_ID[$idx]} after stale running state"
+        ui_status_line 'RESUME' "${EXEC_ID[$idx]}" 'stale running state detected'
       fi
     fi
 
-    say "Starting ${EXEC_ID[$idx]} | model=${EXEC_MODEL[$idx]} | worktree=${EXEC_WORKTREE_PATH[$idx]}"
+    ui_status_line 'START' "${EXEC_ID[$idx]}" "model=${EXEC_MODEL[$idx]} | worktree=${EXEC_WORKTREE_PATH[$idx]}"
     mark_running "$idx"
     run_task_async "$idx" &
     pid=$!
@@ -929,9 +940,9 @@ run_batch() {
       mark_finished "$idx" "$status" "$failure_class" "$rc"
     fi
     if [[ $rc -eq 0 ]]; then
-      printf '%s: DONE | log=%s\n' "${EXEC_ID[$idx]}" "${EXEC_LOG_PATH[$idx]}"
+      ui_status_line 'DONE' "${EXEC_ID[$idx]}" "log=${EXEC_LOG_PATH[$idx]}"
     else
-      printf '%s: FAILED (%s) | log=%s\n' "${EXEC_ID[$idx]}" "$failure_class" "${EXEC_LOG_PATH[$idx]}"
+      ui_status_line 'FAILED' "${EXEC_ID[$idx]}" "$failure_class | log=${EXEC_LOG_PATH[$idx]}"
     fi
   done
 
@@ -959,7 +970,7 @@ run_dry_run() {
   for ((i=0; i<EXEC_COUNT; i++)); do
     if [[ "${EXEC_IS_BARRIER[$i]}" == "1" ]]; then
       if [[ ${#batch[@]} -gt 0 ]]; then
-        printf 'Batch %d\n' "$batch_num"
+        ui_subheading "Batch $batch_num"
         print_batch "${batch[@]}"
         batch_num=$((batch_num + 1))
         batch=()
@@ -971,19 +982,19 @@ run_dry_run() {
       batch+=("$i")
     else
       if [[ ${#batch[@]} -gt 0 ]]; then
-        printf 'Batch %d\n' "$batch_num"
+        ui_subheading "Batch $batch_num"
         print_batch "${batch[@]}"
         batch_num=$((batch_num + 1))
         batch=()
       fi
-      printf 'Batch %d\n' "$batch_num"
+      ui_subheading "Batch $batch_num"
       print_batch "$i"
       batch_num=$((batch_num + 1))
     fi
   done
 
   if [[ ${#batch[@]} -gt 0 ]]; then
-    printf 'Batch %d\n' "$batch_num"
+    ui_subheading "Batch $batch_num"
     print_batch "${batch[@]}"
   fi
 }
@@ -1063,21 +1074,22 @@ run_check() {
   local resume_key
   local resume_status
 
-  say 'Config check: OK'
-  say "CLI: $CLI"
-  say "Project root: $PROJECT_ROOT"
-  say "Git dir: $GIT_DIR"
-  say "Master prompt: $MASTER_PROMPT_PATH"
-  say "Output base: $OUTPUT_BASE"
-  say "Max parallel: $MAX_PARALLEL"
-  say ''
-  say 'Planned batches:'
+  ui_heading 'Config Check'
+  ui_success 'Config check passed'
+  ui_kv 'CLI' "$CLI"
+  ui_kv 'Project root' "$PROJECT_ROOT"
+  ui_kv 'Git dir' "$GIT_DIR"
+  ui_kv 'Master prompt' "$MASTER_PROMPT_PATH"
+  ui_kv 'Output base' "$OUTPUT_BASE"
+  ui_kv 'Max parallel' "$MAX_PARALLEL"
+  printf '\n'
+  ui_heading 'Planned Batches'
   run_dry_run
-  say ''
-  say 'Tracked execution state:'
+  printf '\n'
+  ui_heading 'Tracked Execution State'
 
   if [[ $EXEC_COUNT -eq 0 ]]; then
-    say '  No executions configured.'
+    ui_note 'No executions configured.'
     return 0
   fi
 
@@ -1111,18 +1123,18 @@ run_check() {
       worktree_path='-'
     fi
 
-    printf '  - exec_id: %s\n' "${EXEC_ID[$i]}"
-    printf '    status: %s\n' "$status"
-    printf '    failure_class: %s\n' "$failure_class"
-    printf '    exit_code: %s\n' "$exit_code"
-    printf '    branch: %s\n' "$branch"
-    printf '    worktree: %s\n' "$worktree_path"
-    printf '    worktree_state: %s\n' "$worktree_state"
-    printf '    resume_status: %s\n' "$resume_status"
+    plan_header "${EXEC_ID[$i]}"
+    plan_field 'status' "$status"
+    plan_field 'failure_class' "$failure_class"
+    plan_field 'exit_code' "$exit_code"
+    plan_field 'branch' "$branch"
+    plan_field 'worktree' "$worktree_path"
+    plan_field 'worktree_state' "$worktree_state"
+    plan_field 'resume_status' "$resume_status"
     if [[ -n "$resume_key" && "$resume_key" == "${EXEC_RESUME_KEY[$i]}" ]]; then
-      printf '%s\n' '    resume_key_match: yes'
+      plan_field 'resume_match' 'yes'
     else
-      printf '%s\n' '    resume_key_match: no'
+      plan_field 'resume_match' 'no'
     fi
   done
 }
@@ -1140,19 +1152,21 @@ run_execute() {
   mkdir -p "$LOG_DIR" "$OUTPUT_WAVE_DIR" >/dev/null 2>&1 || die "failed to create log or output directories for wave: $WAVE_TS" 2
   batch=()
 
-  say "Wave started: $WAVE_TS"
-  say "CLI: $CLI"
-  say "Max parallel: $MAX_PARALLEL"
+  ui_heading 'Wave Run'
+  ui_kv 'Wave started' "$WAVE_TS"
+  ui_kv 'CLI' "$CLI"
+  ui_kv 'Max parallel' "$MAX_PARALLEL"
   if [[ "$RESUME_ONLY" == "1" ]]; then
-    say 'Mode: resume'
+    ui_kv 'Mode' 'resume'
   fi
-  say "Logs: $LOG_DIR"
-  say "Output: $OUTPUT_WAVE_DIR"
+  ui_kv 'Logs' "$LOG_DIR"
+  ui_kv 'Output' "$OUTPUT_WAVE_DIR"
+  printf '\n'
 
   for ((i=0; i<EXEC_COUNT; i++)); do
     if [[ "${EXEC_IS_BARRIER[$i]}" == "1" ]]; then
       if [[ ${#batch[@]} -gt 0 ]]; then
-        say "Batch $batch_num started: ${#batch[@]} execution(s) in parallel"
+        ui_status_line 'BATCH' "Batch $batch_num" "${#batch[@]} execution(s) in parallel"
         run_batch "${batch[@]}"
         batch_rc=$?
         batch_num=$((batch_num + 1))
@@ -1170,7 +1184,7 @@ run_execute() {
       batch+=("$i")
     else
       if [[ ${#batch[@]} -gt 0 ]]; then
-        say "Batch $batch_num started: ${#batch[@]} execution(s) in parallel"
+        ui_status_line 'BATCH' "Batch $batch_num" "${#batch[@]} execution(s) in parallel"
         run_batch "${batch[@]}"
         batch_rc=$?
         batch_num=$((batch_num + 1))
@@ -1181,7 +1195,7 @@ run_execute() {
           break
         fi
       fi
-      say "Batch $batch_num started: 1 execution in sequence"
+      ui_status_line 'BATCH' "Batch $batch_num" '1 execution in sequence'
       run_batch "$i"
       batch_rc=$?
       batch_num=$((batch_num + 1))
@@ -1194,7 +1208,7 @@ run_execute() {
   done
 
   if [[ $stop_after_failure -eq 0 && ${#batch[@]} -gt 0 ]]; then
-    say "Batch $batch_num started: ${#batch[@]} execution(s) in parallel"
+    ui_status_line 'BATCH' "Batch $batch_num" "${#batch[@]} execution(s) in parallel"
     run_batch "${batch[@]}"
     batch_rc=$?
     batch_num=$((batch_num + 1))
@@ -1206,14 +1220,18 @@ run_execute() {
   if [[ $stop_after_failure -ne 0 ]]; then
     SKIPPED_COUNT=$remaining_count
     if [[ $remaining_count -gt 0 ]]; then
-      say "Fail-fast: stopping before later batches because the previous batch failed"
-      say "Skipped executions: $remaining_count"
+      ui_warn 'Fail-fast: stopping before later batches because the previous batch failed'
+      ui_kv 'Skipped executions' "$remaining_count"
     else
-      say "Fail-fast: no later batches were launched because the previous batch failed"
+      ui_warn 'Fail-fast: no later batches were launched because the previous batch failed'
     fi
   fi
 
-  printf 'Summary: done=%d failed=%d skipped=%d\n' "$DONE_COUNT" "$FAILED_COUNT" "$SKIPPED_COUNT"
+  printf '\n'
+  ui_heading 'Summary'
+  ui_kv 'Done' "$DONE_COUNT"
+  ui_kv 'Failed' "$FAILED_COUNT"
+  ui_kv 'Skipped' "$SKIPPED_COUNT"
   if [[ $ANY_FAILED -ne 0 ]]; then
     exit 1
   fi

@@ -3,6 +3,8 @@
 set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+. "$SCRIPT_DIR/src/ui.sh"
+ui_init
 
 usage() {
   cat <<'EOF'
@@ -12,24 +14,36 @@ Usage:
 EOF
 }
 
+say_err() {
+  ui_error "$*"
+}
+
+say_warn() {
+  ui_warn "$*"
+}
+
+say_info() {
+  ui_info "$*"
+}
+
 install_hint() {
   case "$1" in
     jq)
       if [[ "$(uname -s)" == "Darwin" ]]; then
-        printf '%s\n' 'missing prerequisite: jq (install with: brew install jq)' >&2
+        say_err 'missing prerequisite: jq (install with: brew install jq)'
       else
-        printf '%s\n' 'missing prerequisite: jq (install with: apt install jq)' >&2
+        say_err 'missing prerequisite: jq (install with: apt install jq)'
       fi
       ;;
     git)
       if [[ "$(uname -s)" == "Darwin" ]]; then
-        printf '%s\n' 'missing prerequisite: git (install with: brew install git)' >&2
+        say_err 'missing prerequisite: git (install with: brew install git)'
       else
-        printf '%s\n' 'missing prerequisite: git (install with: apt install git)' >&2
+        say_err 'missing prerequisite: git (install with: apt install git)'
       fi
       ;;
     *)
-      printf 'missing prerequisite: %s\n' "$1" >&2
+      say_err "missing prerequisite: $1"
       ;;
   esac
 }
@@ -138,6 +152,11 @@ copy_howtouse() {
   cp "$SCRIPT_DIR/templates/howtouse.md.tpl" "$target/howtouse.md"
 }
 
+copy_ui() {
+  local target="$1"
+  cp "$SCRIPT_DIR/src/ui.sh" "$target/ui.sh"
+}
+
 copy_adapter() {
   local cli="$1"
   local target="$2"
@@ -177,32 +196,34 @@ run_upgrade() {
 
   config_path="$target/config.json"
   if [[ ! -f "$config_path" ]]; then
-    printf '%s\n' "upgrade target is missing config.json: $config_path" >&2
+    say_err "upgrade target is missing config.json: $config_path"
     exit 2
   fi
 
   cli=$(jq -r '.cli // empty' "$config_path")
   if [[ "$cli" != "claude" && "$cli" != "codex" ]]; then
-    printf '%s\n' "upgrade target config.json has unsupported or missing cli: $cli" >&2
+    say_err "upgrade target config.json has unsupported or missing cli: $cli"
     exit 2
   fi
 
   mkdir -p "$target"
   cp "$SCRIPT_DIR/src/run.sh" "$target/run.sh"
+  copy_ui "$target"
   copy_howtouse "$target"
   copy_adapter "$cli" "$target"
   chmod +x "$target/run.sh"
 
-  printf 'Upgraded wave runner at: %s\n' "$target"
-  printf '%s\n' "Updated: run.sh, howtouse.md, adapters/$cli.sh"
+  ui_heading 'Upgrade Complete'
+  ui_kv 'Target' "$target"
+  ui_kv 'Updated' "run.sh, ui.sh, howtouse.md, adapters/$cli.sh"
 }
 
 prompt_value() {
   local prompt_text="$1"
   local value
 
-  printf '%s\n' "$prompt_text" >&2
-  printf '      > ' >&2
+  ui_prompt_line '' "$prompt_text"
+  ui_prompt_marker
   IFS= read -r value
   printf '%s' "$value"
 }
@@ -216,7 +237,7 @@ prompt_existing_project_root() {
       printf '%s' "$value"
       return 0
     fi
-    printf '%s\n' "project root does not exist: $value" >&2
+    say_err "project root does not exist: $value"
   done
 }
 
@@ -236,7 +257,7 @@ prompt_install_target() {
       return 0
     fi
 
-    printf '%s\n' "install target already exists: $value" >&2
+    say_warn "install target already exists: $value"
     remove_choice=$(prompt_value "      Remove it with rm -rf and continue? (y/n)")
     case "$remove_choice" in
       y|Y|yes|YES|Yes)
@@ -245,10 +266,10 @@ prompt_install_target() {
         return 0
         ;;
       n|N|no|NO|No|'')
-        printf '%s\n' 'choose another installation directory' >&2
+        say_warn 'choose another installation directory'
         ;;
       *)
-        printf '%s\n' "unrecognized choice \"$remove_choice\"; choose another installation directory" >&2
+        say_warn "unrecognized choice \"$remove_choice\"; choose another installation directory"
         ;;
     esac
   done
@@ -271,13 +292,13 @@ append_gitignore_entry() {
       relative_target=${target_abs#"$project_root_abs"/}
       ;;
     *)
-      printf '%s\n' "warning: install target is outside project root; skipping .gitignore update: $target_abs" >&2
+      say_warn "install target is outside project root; skipping .gitignore update: $target_abs"
       return 0
       ;;
   esac
 
   if [[ -z "$relative_target" || "$relative_target" == "$target_abs" ]]; then
-    printf '%s\n' "warning: could not derive a relative .gitignore path for: $target_abs" >&2
+    say_warn "could not derive a relative .gitignore path for: $target_abs"
     return 0
   fi
 
@@ -331,7 +352,7 @@ main() {
     1) cli="claude" ;;
     2) cli="codex" ;;
     *)
-      printf '%s\n' 'invalid CLI choice; expected 1 or 2' >&2
+      say_err 'invalid CLI choice; expected 1 or 2'
       exit 2
       ;;
   esac
@@ -344,6 +365,7 @@ main() {
   cp "$SCRIPT_DIR/src/run.sh" "$target/run.sh"
   chmod +x "$target/run.sh"
   render_config "$cli" "$project_root" "$git_dir" "$target"
+  copy_ui "$target"
   copy_howtouse "$target"
   copy_adapter "$cli" "$target"
 
@@ -354,21 +376,21 @@ main() {
     n|N|no|NO|No|'')
       ;;
     *)
-      printf '%s\n' "warning: unrecognized .gitignore choice \"$gitignore_choice\"; skipping .gitignore update" >&2
+      say_warn "unrecognized .gitignore choice \"$gitignore_choice\"; skipping .gitignore update"
       ;;
   esac
 
-  cat <<EOF
-Done. Wave runner installed at: $target
-
-Next steps:
-  1. Edit config.json         — verify paths and replace the example execution
-  2. Point master_prompt_path at your project-wide prompt file
-  3. Point executions[] at your techspec and prompt files
-  4. Run:
-       $target/run.sh --dry-run
-       $target/run.sh
-EOF
+  ui_heading 'Install Complete'
+  ui_kv 'Target' "$target"
+  ui_kv 'CLI' "$cli"
+  ui_kv 'Git dir' "$git_dir"
+  printf '\n'
+  ui_subheading 'Next Steps'
+  ui_kv '1' 'Edit config.json and replace the example execution'
+  ui_kv '2' 'Point master_prompt_path at your project-wide prompt file'
+  ui_kv '3' 'Point executions[] at your techspec and prompt files'
+  ui_kv '4' "$target/run.sh --dry-run"
+  ui_kv '5' "$target/run.sh"
 
   howtouse_rel=$(relative_path_under_root "$project_root" "$target/howtouse.md")
   if [[ -n "$howtouse_rel" ]]; then
@@ -382,11 +404,9 @@ EOF
     target_rel="$target"
   fi
 
-  cat <<EOF
-
-Suggested prompt for your project AI agent:
-  Refer to $howtouse_ref and set up Waverunner for this project. Update $target_rel/config.json to match the tasks I give you, create any missing prompt/spec/master-prompt artifacts that config needs, keep the orchestration inside Waverunner instead of adding custom runner scripts to the core repo, and then show me the resulting wave plan.
-EOF
+  printf '\n'
+  ui_subheading 'Suggested Prompt For Your AI Agent'
+  printf '  %s\n' "Refer to $howtouse_ref and set up Waverunner for this project. Update $target_rel/config.json to match the tasks I give you, create any missing prompt/spec/master-prompt artifacts that config needs, keep the orchestration inside Waverunner instead of adding custom runner scripts to the core repo, and then show me the resulting wave plan."
 }
 
 main "$@"

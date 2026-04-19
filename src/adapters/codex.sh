@@ -14,7 +14,7 @@ adapter_validate_execution() {
 }
 
 adapter_print_execution_plan() {
-  printf '%s\n' '    mode: safe_unattended (approval=never sandbox=workspace-write)'
+  plan_field 'mode' 'safe_unattended (approval=never sandbox=workspace-write)'
 }
 
 adapter_run_cli() {
@@ -27,8 +27,9 @@ adapter_run_cli() {
 
   (
     cd "$worktree_path" || exit 1
-    codex exec \
+    codex \
       -a never \
+      exec \
       -s workspace-write \
       -C "$worktree_path" \
       --add-dir "$output_dir" \

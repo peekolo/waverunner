@@ -226,7 +226,7 @@ Real execution:
 - acquires a run lock so only one real wave runs from an install directory at a time
 - runs the selected CLI in the adapter-defined unattended mode
   - `claude`: `-p --allowedTools ... --max-turns 100 --output-format json --dangerously-skip-permissions`
-  - `codex`: `exec -a never -s workspace-write`
+  - `codex`: `-a never exec -s workspace-write`
 - updates `state.json`
 - prints `DONE` or `FAILED (<failure_class>)` per execution when a task fails
 - records `skipped` in `state.json` for executions not launched because fail-fast stopped later batches
