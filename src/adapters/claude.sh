@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 
 CLAUDE_ALLOWED_TOOLS='Read,Grep,Glob,Write,Edit,MultiEdit,Bash'
-CLAUDE_MAX_TURNS=100
 CLAUDE_TIMEOUT_SECONDS=14400  # 4 hours; emergency backstop only — tune per project
 
 adapter_require_cli() {

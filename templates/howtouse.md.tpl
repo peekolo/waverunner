@@ -30,6 +30,7 @@ Top-level fields:
 - `master_prompt_path`: project-wide prompt file used for every execution
 - `output_base`: base directory for wave outputs, usually `./output`
 - `max_parallel`: maximum allowed size of any parallel batch; default is `3`
+- `claude_max_turns`: optional for `claude`; defaults to `300`
 - `executions`: ordered list of execution entries
 
 Per-execution fields:

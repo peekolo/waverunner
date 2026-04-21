@@ -22,6 +22,7 @@ GIT_DIR=""
 MASTER_PROMPT_PATH=""
 OUTPUT_BASE=""
 MAX_PARALLEL=3
+CLAUDE_MAX_TURNS=300
 OUTPUT_WAVE_DIR=""
 WAVE_TS=""
 LOG_DIR=""
@@ -494,6 +495,12 @@ load_config() {
   fi
   if ! [[ "$MAX_PARALLEL" =~ ^[1-9][0-9]*$ ]]; then
     die "config.json field max_parallel must be a positive integer; got: $MAX_PARALLEL" 2
+  fi
+  if [[ "$CLI" == "claude" ]]; then
+    CLAUDE_MAX_TURNS=$(jq -r '.claude_max_turns // 300' "$CONFIG_PATH")
+    if ! [[ "$CLAUDE_MAX_TURNS" =~ ^[1-9][0-9]*$ ]]; then
+      die "config.json field claude_max_turns must be a positive integer; got: $CLAUDE_MAX_TURNS" 2
+    fi
   fi
   load_adapter
   adapter_require_cli

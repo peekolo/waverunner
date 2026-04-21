@@ -5,6 +5,7 @@
   "master_prompt_path": "{{PROJECT_ROOT}}/master_prompt.md",
   "output_base": "./output",
   "max_parallel": 3,
+{{CLI_TOP_LEVEL_BLOCK}}
   "executions": [
     {
       "techspec_path": "{{PROJECT_ROOT}}/specs/SPEC-XX.md",

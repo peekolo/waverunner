@@ -125,11 +125,14 @@ render_config() {
   local target="$4"
   local template_path="$SCRIPT_DIR/templates/config.json.tpl"
   local example_model_block
+  local cli_top_level_block
 
   if [[ "$cli" == "claude" ]]; then
+    cli_top_level_block='  "claude_max_turns": 300,'
     example_model_block='      "model": "claude-sonnet-4-6",
       "effort": "high"'
   else
+    cli_top_level_block=''
     example_model_block='      "model": "codex-mini-latest"'
   fi
 
@@ -137,11 +140,13 @@ render_config() {
     -v cli="$(escape_awk_replacement "$cli")" \
     -v project_root="$(escape_awk_replacement "$project_root")" \
     -v git_dir="$(escape_awk_replacement "$git_dir")" \
+    -v cli_top_level_block="$(escape_awk_replacement "$cli_top_level_block")" \
     -v example_model_block="$(escape_awk_replacement "$example_model_block")" \
     '{
       gsub(/\{\{CLI\}\}/, cli)
       gsub(/\{\{PROJECT_ROOT\}\}/, project_root)
       gsub(/\{\{GIT_DIR\}\}/, git_dir)
+      gsub(/\{\{CLI_TOP_LEVEL_BLOCK\}\}/, cli_top_level_block)
       gsub(/\{\{EXAMPLE_MODEL_BLOCK\}\}/, example_model_block)
       print
     }' "$template_path" > "$target/config.json"

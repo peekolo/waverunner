@@ -17,8 +17,9 @@ The installer also copies `howtouse.md` and prints a ready-to-paste prompt for y
 4. Replace the baked-in example execution with your real execution list.
 5. Point each execution at the real techspec and prompt files you want to use.
 6. Set `max_parallel` if you want something other than the default of `3`.
-7. Keep each parallel batch at or below `max_parallel` and insert `{ "parallel": "no" }` breaks manually when needed.
-8. Inspect the plan:
+7. If `cli` is `claude`, set `claude_max_turns` if you want something other than the default of `300`.
+8. Keep each parallel batch at or below `max_parallel` and insert `{ "parallel": "no" }` breaks manually when needed.
+9. Inspect the plan:
 
 ```bash
 ./run.sh --dry-run
@@ -36,7 +37,7 @@ If a previous wave partially completed, resume it without rerunning already comp
 ./run.sh --resume
 ```
 
-9. Launch the wave:
+10. Launch the wave:
 
 ```bash
 ./run.sh
@@ -44,7 +45,7 @@ If a previous wave partially completed, resume it without rerunning already comp
 
 The installed adapters currently run in these unattended modes:
 
-- `claude`: `-p --allowedTools ... --max-turns 100 --output-format json --dangerously-skip-permissions`
+- `claude`: `-p --allowedTools ... --max-turns <claude_max_turns>` with `claude_max_turns` defaulting to `300`
 - `codex`: `exec -a never -s workspace-write`
 
 That means the wave should not pause for approval prompts. Claude currently uses the same dangerous-permissions pattern that already works in your other project, constrained by an explicit allowed-tools list.

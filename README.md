@@ -108,6 +108,7 @@ Example:
   "master_prompt_path": "/var/www/my_project/master_prompt.md",
   "output_base": "./output",
   "max_parallel": 3,
+  "claude_max_turns": 300,
   "executions": [
     {
       "techspec_path": "/var/www/my_project/specs/SPEC-01.md",
@@ -143,6 +144,7 @@ Top-level fields:
 - `master_prompt_path`: project-wide prompt file
 - `output_base`: base directory for per-execution outputs
 - `max_parallel`: maximum allowed size of one parallel batch; defaults to `3`
+- `claude_max_turns`: optional for `claude`; defaults to `300`
 - `executions`: ordered execution list
 
 Per-execution fields:
@@ -225,7 +227,7 @@ Real execution:
 - refuses to reuse a tracked worktree if it is dirty
 - acquires a run lock so only one real wave runs from an install directory at a time
 - runs the selected CLI in the adapter-defined unattended mode
-  - `claude`: `-p --allowedTools ... --max-turns 100 --output-format json --dangerously-skip-permissions`
+  - `claude`: `-p --allowedTools ... --max-turns <claude_max_turns>` with `claude_max_turns` defaulting to `300`
   - `codex`: `-a never exec -s workspace-write`
 - updates `state.json`
 - prints `DONE` or `FAILED (<failure_class>)` per execution when a task fails
