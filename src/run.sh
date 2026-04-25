@@ -99,6 +99,13 @@ install_hint() {
         say_err 'missing prerequisite: git (install with: apt install git)'
       fi
       ;;
+    perl)
+      if [[ "$(uname -s)" == "Darwin" ]]; then
+        say_err 'missing prerequisite: perl for cli=claude (install with: brew install perl)'
+      else
+        say_err 'missing prerequisite: perl for cli=claude (install with: apt install perl)'
+      fi
+      ;;
     *)
       say_err "missing prerequisite: $1"
       ;;
@@ -136,9 +143,11 @@ check_prereqs() {
 cleanup_interrupt() {
   local pid
   say_err 'interrupted; killing children...'
-  for pid in "${CHILDREN[@]}"; do
-    kill "$pid" 2>/dev/null || true
-  done
+  if [[ ${#CHILDREN[@]} -gt 0 ]]; then
+    for pid in "${CHILDREN[@]}"; do
+      kill "$pid" 2>/dev/null || true
+    done
+  fi
   wait 2>/dev/null || true
   exit 130
 }
@@ -195,18 +204,20 @@ normalize_path() {
   IFS=$old_ifs
 
   out=()
-  for part in "${pieces[@]}"; do
-    if [[ -z "$part" || "$part" == "." ]]; then
-      continue
-    fi
-    if [[ "$part" == ".." ]]; then
-      if [[ ${#out[@]} -gt 0 ]]; then
-        unset 'out[${#out[@]}-1]'
+  if [[ ${#pieces[@]} -gt 0 ]]; then
+    for part in "${pieces[@]}"; do
+      if [[ -z "$part" || "$part" == "." ]]; then
+        continue
       fi
-      continue
-    fi
-    out+=("$part")
-  done
+      if [[ "$part" == ".." ]]; then
+        if [[ ${#out[@]} -gt 0 ]]; then
+          unset 'out[${#out[@]}-1]'
+        fi
+        continue
+      fi
+      out+=("$part")
+    done
+  fi
 
   joined=""
   for ((i=0; i<${#out[@]}; i++)); do
@@ -324,12 +335,14 @@ unique_exec_id() {
 
   while :; do
     found=0
-    for existing in "${EXEC_ID[@]}"; do
-      if [[ "$existing" == "$unique" ]]; then
-        found=1
-        break
-      fi
-    done
+    if [[ ${#EXEC_ID[@]} -gt 0 ]]; then
+      for existing in "${EXEC_ID[@]}"; do
+        if [[ "$existing" == "$unique" ]]; then
+          found=1
+          break
+        fi
+      done
+    fi
     if [[ $found -eq 0 ]]; then
       printf '%s\n' "$unique"
       return 0
@@ -744,27 +757,44 @@ classify_task_failure() {
     return 0
   fi
 
-  if grep -E -i 'rate limit|rate-limit|too many requests|429|quota|usage limit|capacity|try again later' "$log_file" >/dev/null 2>&1; then
+  # Trust a clean JSON success blob over keyword grep. claude -p emits
+  # is_error/terminal_reason on success; if those say done, classify as
+  # success-then-signal rather than guessing a network/auth/etc cause.
+  # NOTE: jq's `//` operator fires on null AND false, so we use has()
+  # + tostring to disambiguate "field missing" from "field is false".
+  if [[ -f "$log_file" ]] && command -v jq >/dev/null 2>&1; then
+    local _is_error _term_reason
+    _is_error=$(jq -r 'if has("is_error") then (.is_error|tostring) else "missing" end' "$log_file" 2>/dev/null || true)
+    _term_reason=$(jq -r 'if has("terminal_reason") then (.terminal_reason|tostring) else "missing" end' "$log_file" 2>/dev/null || true)
+    if [[ "$_is_error" == "false" && "$_term_reason" == "completed" ]]; then
+      printf '%s\n' 'success_then_signal'
+      return 0
+    fi
+  fi
+
+  # Word-boundary anchors on the keyword classifiers below to keep tokens
+  # like BINANCE_NETWORK / mainnet / dnsname from spuriously matching.
+  if grep -E -i '(^|[^[:alnum:]_])(rate[- ]limit|too many requests|429|quota|usage limit|capacity|try again later)([^[:alnum:]_]|$)' "$log_file" >/dev/null 2>&1; then
     printf '%s\n' 'rate_limit'
     return 0
   fi
 
-  if grep -E -i 'authentication|unauthorized|forbidden|api key|not logged in|login required|invalid credential|invalid token|permission denied|auth' "$log_file" >/dev/null 2>&1; then
+  if grep -E -i '(^|[^[:alnum:]_])(authentication|unauthorized|forbidden|api[- ]key|not logged in|login required|invalid credential|invalid token|permission denied|auth)([^[:alnum:]_]|$)' "$log_file" >/dev/null 2>&1; then
     printf '%s\n' 'auth_error'
     return 0
   fi
 
-  if grep -E -i 'approval|requires approval|ask for approval|permission prompt|cannot ask|dontask|sandbox denied|denied by sandbox|blocked by sandbox|blocked by permission|disallowed tool|tool denied|cannot use tool|operation not permitted' "$log_file" >/dev/null 2>&1; then
+  if grep -E -i '(^|[^[:alnum:]_])(approval|requires approval|ask for approval|permission prompt|cannot ask|dontask|sandbox denied|denied by sandbox|blocked by sandbox|blocked by permission|disallowed tool|tool denied|cannot use tool|operation not permitted)([^[:alnum:]_]|$)' "$log_file" >/dev/null 2>&1; then
     printf '%s\n' 'permission_denied'
     return 0
   fi
 
-  if grep -E -i 'network|timed out|timeout|connection reset|connection refused|temporary failure|dns|enotfound|econn|tls|ssl' "$log_file" >/dev/null 2>&1; then
+  if grep -E -i '(^|[^[:alnum:]_])(network error|timed out|timeout|connection reset|connection refused|temporary failure|dns lookup|ENOTFOUND|ECONNREFUSED|ECONNRESET|tls handshake|ssl handshake|socket hang up)([^[:alnum:]_]|$)' "$log_file" >/dev/null 2>&1; then
     printf '%s\n' 'network_error'
     return 0
   fi
 
-  if grep -E -i 'interrupted|cancelled|canceled|terminated by signal|sigint|sigterm' "$log_file" >/dev/null 2>&1; then
+  if grep -E -i '(^|[^[:alnum:]_])(interrupted|cancelled|canceled|terminated by signal|sigint|sigterm)([^[:alnum:]_]|$)' "$log_file" >/dev/null 2>&1; then
     printf '%s\n' 'interrupted'
     return 0
   fi
@@ -845,28 +875,33 @@ mark_stale_running_resumed() {
 }
 
 run_batch() {
-  local -a batch_indices
   local -a batch_pids
   local -a launched_indices
+  local -a batch_done
+  local -a running
   local idx
   local pid
   local i
+  local j
   local rc
   local status
   local failure_class
   local batch_failed=0
   local resume_status
   local batch_start
-  local heartbeat_pid
+  local pending_count=0
+  local next_heartbeat=0
+  local now
+  local elapsed
+  local progress
 
-  batch_indices=("$@")
   batch_pids=()
   launched_indices=()
+  batch_done=()
   CHILDREN=()
-  heartbeat_pid=0
   batch_start=$(date +%s)
 
-  for idx in "${batch_indices[@]}"; do
+  for idx in "$@"; do
     if ! execution_should_run "$idx"; then
       DONE_COUNT=$((DONE_COUNT + 1))
       ui_status_line 'SKIPPED' "${EXEC_ID[$idx]}" 'already done in matching prior run'
@@ -932,57 +967,80 @@ run_batch() {
     launched_indices+=("$idx")
   done
 
-  if [[ ${#batch_pids[@]} -gt 0 ]]; then
-    (
-      sleep 120
-      while true; do
+  pending_count=${#batch_pids[@]}
+  if [[ $pending_count -gt 0 ]]; then
+    next_heartbeat=$((batch_start + 120))
+
+    while [[ $pending_count -gt 0 ]]; do
+      progress=0
+
+      for ((i=0; i<${#batch_pids[@]}; i++)); do
+        if [[ "${batch_done[$i]-}" == "1" ]]; then
+          continue
+        fi
+
+        pid="${batch_pids[$i]}"
+        if kill -0 "$pid" 2>/dev/null; then
+          continue
+        fi
+
+        idx="${launched_indices[$i]}"
+        if wait "$pid"; then
+          rc=0
+          status='done'
+          failure_class=''
+          DONE_COUNT=$((DONE_COUNT + 1))
+        else
+          rc=$?
+          status='failed'
+          failure_class=$(classify_task_failure "${EXEC_LOG_PATH[$idx]}" "$rc")
+          batch_failed=1
+          ANY_FAILED=1
+          FAILED_COUNT=$((FAILED_COUNT + 1))
+        fi
+
+        EXEC_FAILURE_CLASS[$idx]="$failure_class"
+        EXEC_EXIT_CODE[$idx]="$rc"
+        if [[ $rc -eq 0 ]]; then
+          mark_finished "$idx" "$status" '' '0'
+        else
+          mark_finished "$idx" "$status" "$failure_class" "$rc"
+        fi
+        if [[ $rc -eq 0 ]]; then
+          ui_status_line 'DONE' "${EXEC_ID[$idx]}" "log=${EXEC_LOG_PATH[$idx]}"
+        else
+          ui_status_line 'FAILED' "${EXEC_ID[$idx]}" "$failure_class | log=${EXEC_LOG_PATH[$idx]}"
+        fi
+
+        batch_done[$i]='1'
+        pending_count=$((pending_count - 1))
+        progress=1
+      done
+
+      if [[ $pending_count -eq 0 ]]; then
+        break
+      fi
+
+      now=$(date +%s)
+      if [[ $now -ge $next_heartbeat ]]; then
         running=()
         for ((j=0; j<${#batch_pids[@]}; j++)); do
+          if [[ "${batch_done[$j]-}" == "1" ]]; then
+            continue
+          fi
           kill -0 "${batch_pids[$j]}" 2>/dev/null && running+=("${EXEC_ID[${launched_indices[$j]}]}")
         done
-        [[ ${#running[@]} -gt 0 ]] || break
-        elapsed=$(( $(date +%s) - batch_start ))
-        ui_info "still running (${elapsed}s): ${running[*]}"
-        sleep 600
-      done
-    ) &
-    heartbeat_pid=$!
-    CHILDREN+=("$heartbeat_pid")
-  fi
+        if [[ ${#running[@]} -gt 0 ]]; then
+          elapsed=$((now - batch_start))
+          ui_info "still running (${elapsed}s): ${running[*]}"
+        fi
+        next_heartbeat=$((now + 600))
+      fi
 
-  for ((i=0; i<${#batch_pids[@]}; i++)); do
-    pid="${batch_pids[$i]}"
-    idx="${launched_indices[$i]}"
-    if wait "$pid"; then
-      rc=0
-      status='done'
-      failure_class=''
-      DONE_COUNT=$((DONE_COUNT + 1))
-    else
-      rc=$?
-      status='failed'
-      failure_class=$(classify_task_failure "${EXEC_LOG_PATH[$idx]}" "$rc")
-      batch_failed=1
-      ANY_FAILED=1
-      FAILED_COUNT=$((FAILED_COUNT + 1))
-    fi
-    EXEC_FAILURE_CLASS[$idx]="$failure_class"
-    EXEC_EXIT_CODE[$idx]="$rc"
-    if [[ $rc -eq 0 ]]; then
-      mark_finished "$idx" "$status" '' '0'
-    else
-      mark_finished "$idx" "$status" "$failure_class" "$rc"
-    fi
-    if [[ $rc -eq 0 ]]; then
-      ui_status_line 'DONE' "${EXEC_ID[$idx]}" "log=${EXEC_LOG_PATH[$idx]}"
-    else
-      ui_status_line 'FAILED' "${EXEC_ID[$idx]}" "$failure_class | log=${EXEC_LOG_PATH[$idx]}"
-    fi
-  done
-
-  if [[ $heartbeat_pid -ne 0 ]]; then
-    kill "$heartbeat_pid" 2>/dev/null || true
-    wait "$heartbeat_pid" 2>/dev/null || true
+      if [[ $progress -eq 0 ]]; then
+        sleep 1
+      fi
+    done
   fi
 
   CHILDREN=()

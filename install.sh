@@ -42,6 +42,13 @@ install_hint() {
         say_err 'missing prerequisite: git (install with: apt install git)'
       fi
       ;;
+    perl)
+      if [[ "$(uname -s)" == "Darwin" ]]; then
+        say_err 'missing prerequisite: perl for cli=claude (install with: brew install perl)'
+      else
+        say_err 'missing prerequisite: perl for cli=claude (install with: apt install perl)'
+      fi
+      ;;
     *)
       say_err "missing prerequisite: $1"
       ;;
@@ -85,18 +92,20 @@ normalize_path() {
   IFS=$old_ifs
 
   out=()
-  for part in "${pieces[@]}"; do
-    if [[ -z "$part" || "$part" == "." ]]; then
-      continue
-    fi
-    if [[ "$part" == ".." ]]; then
-      if [[ ${#out[@]} -gt 0 ]]; then
-        unset 'out[${#out[@]}-1]'
+  if [[ ${#pieces[@]} -gt 0 ]]; then
+    for part in "${pieces[@]}"; do
+      if [[ -z "$part" || "$part" == "." ]]; then
+        continue
       fi
-      continue
-    fi
-    out+=("$part")
-  done
+      if [[ "$part" == ".." ]]; then
+        if [[ ${#out[@]} -gt 0 ]]; then
+          unset 'out[${#out[@]}-1]'
+        fi
+        continue
+      fi
+      out+=("$part")
+    done
+  fi
 
   joined=""
   for ((i=0; i<${#out[@]}; i++)); do
@@ -209,6 +218,9 @@ run_upgrade() {
   if [[ "$cli" != "claude" && "$cli" != "codex" ]]; then
     say_err "upgrade target config.json has unsupported or missing cli: $cli"
     exit 2
+  fi
+  if [[ "$cli" == "claude" ]]; then
+    require_cmd perl
   fi
 
   mkdir -p "$target"
@@ -361,6 +373,9 @@ main() {
       exit 2
       ;;
   esac
+  if [[ "$cli" == "claude" ]]; then
+    require_cmd perl
+  fi
 
   if [[ -z "$git_dir" ]]; then
     git_dir="$project_root"

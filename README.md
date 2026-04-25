@@ -56,8 +56,9 @@ Waverunner installs one shared runner plus the selected CLI adapter. It copies a
 - One supported AI CLI installed and already authenticated:
   - `claude`
   - `codex`
+- `perl` when `cli` is `claude`
 
-If `jq` or `git` is missing, both `install.sh` and `run.sh` exit with code `2` and print a one-line install hint.
+If a required dependency is missing, `install.sh` and `run.sh` exit with code `2` and print a one-line install hint. For `cli=claude`, that includes `perl`.
 
 ## Install
 
@@ -81,6 +82,7 @@ Behavior to know:
 - The install target defaults to `<project_root>/waverunner`.
 - If the install target already exists, the installer can remove it or let you choose another path.
 - If the install target lives under the project root, the installer can append `/<relative-target>/` to the project `.gitignore` without duplicating the entry.
+- If you select `claude`, the installer checks that `perl` is available before completing.
 - The generated `config.json` contains one baked-in example execution.
 - The installer copies `howtouse.md` and prints a ready-to-paste prompt that points your project AI agent at it.
 
