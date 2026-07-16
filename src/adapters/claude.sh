@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 
 CLAUDE_ALLOWED_TOOLS='Read,Grep,Glob,Write,Edit,MultiEdit,Bash'
-CLAUDE_MAX_TURNS=100
+# Default only; run.sh overrides this from config.json (claude_max_turns).
+CLAUDE_MAX_TURNS="${CLAUDE_MAX_TURNS:-300}"
 CLAUDE_TIMEOUT_SECONDS=14400  # 4 hours; emergency backstop only — tune per project
 
-adapter_require_cli() {
+claude_require_cli() {
   require_cmd claude
   require_cmd perl
 }
 
-adapter_validate_execution() {
+claude_validate_execution() {
   local idx="$1"
   local effort="${EXEC_EFFORT[$idx]}"
 
@@ -18,7 +19,7 @@ adapter_validate_execution() {
   fi
 }
 
-adapter_print_execution_plan() {
+claude_print_execution_plan() {
   local idx="$1"
   plan_field 'effort' "${EXEC_EFFORT[$idx]}"
   plan_field 'tools' "$CLAUDE_ALLOWED_TOOLS"
@@ -86,7 +87,7 @@ claude_start_timeout_watchdog() {
   CLAUDE_TIMEOUT_WATCHDOG_PID=$!
 }
 
-adapter_run_cli() {
+claude_run_cli() {
   local prompt_file="$1"
   local log_file="$2"
   local worktree_path="$3"

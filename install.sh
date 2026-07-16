@@ -171,12 +171,16 @@ copy_ui() {
   cp "$SCRIPT_DIR/src/ui.sh" "$target/ui.sh"
 }
 
-copy_adapter() {
-  local cli="$1"
-  local target="$2"
+# All adapters are always installed so a single installation can mix
+# claude and codex executions in one wave (per-execution "cli" override).
+copy_adapters() {
+  local target="$1"
+  local adapter_path
 
   mkdir -p "$target/adapters"
-  cp "$SCRIPT_DIR/src/adapters/$cli.sh" "$target/adapters/$cli.sh"
+  for adapter_path in "$SCRIPT_DIR/src/adapters/"*.sh; do
+    cp "$adapter_path" "$target/adapters/$(basename "$adapter_path")"
+  done
 }
 
 relative_path_under_root() {
@@ -219,7 +223,8 @@ run_upgrade() {
     say_err "upgrade target config.json has unsupported or missing cli: $cli"
     exit 2
   fi
-  if [[ "$cli" == "claude" ]]; then
+  # perl is needed if any execution runs claude (per-exec cli overrides the default)
+  if jq -e '(.cli == "claude") or ([.executions[]? | .cli] | index("claude") != null)' "$config_path" >/dev/null 2>&1; then
     require_cmd perl
   fi
 
@@ -227,12 +232,12 @@ run_upgrade() {
   cp "$SCRIPT_DIR/src/run.sh" "$target/run.sh"
   copy_ui "$target"
   copy_howtouse "$target"
-  copy_adapter "$cli" "$target"
+  copy_adapters "$target"
   chmod +x "$target/run.sh"
 
   ui_heading 'Upgrade Complete'
   ui_kv 'Target' "$target"
-  ui_kv 'Updated' "run.sh, ui.sh, howtouse.md, adapters/$cli.sh"
+  ui_kv 'Updated' "run.sh, ui.sh, howtouse.md, adapters/*.sh"
 }
 
 prompt_value() {
@@ -362,7 +367,7 @@ main() {
   default_target="$project_root/waverunner"
   target=$(prompt_install_target "$default_target")
   gitignore_choice=$(prompt_value '[3/5] Add the wave runner directory to the project .gitignore? (y/n)')
-  cli_choice=$(prompt_value '[4/5] Which CLI? (1) claude  (2) codex')
+  cli_choice=$(prompt_value '[4/5] Default CLI? (1) claude  (2) codex  (executions can override per task)')
   git_dir=$(prompt_value '[5/5] Git dir? (blank = same as project root)')
 
   case "$cli_choice" in
@@ -387,7 +392,7 @@ main() {
   render_config "$cli" "$project_root" "$git_dir" "$target"
   copy_ui "$target"
   copy_howtouse "$target"
-  copy_adapter "$cli" "$target"
+  copy_adapters "$target"
 
   case "$gitignore_choice" in
     y|Y|yes|YES|Yes)
@@ -402,7 +407,7 @@ main() {
 
   ui_heading 'Install Complete'
   ui_kv 'Target' "$target"
-  ui_kv 'CLI' "$cli"
+  ui_kv 'Default CLI' "$cli"
   ui_kv 'Git dir' "$git_dir"
   printf '\n'
   ui_subheading 'Next Steps'

@@ -24,7 +24,7 @@ Refer to <relative-path-to-waverunner>/howtouse.md and set up Waverunner for thi
 
 ## Why Use It
 
-- Run multiple Claude or Codex tasks from one config file.
+- Run multiple Claude or Codex tasks from one config file — including both CLIs mixed in the same wave.
 - Isolate every execution in its own git worktree.
 - Mix parallel batches with explicit sequential barriers.
 - Keep an audit trail of assembled prompts, logs, outputs, and worktree state.
@@ -40,25 +40,26 @@ Run `install.sh` from this repo once, then operate from the installed target dir
 ├── config.json
 ├── howtouse.md
 ├── adapters/
-│   └── <cli>.sh
+│   ├── claude.sh
+│   └── codex.sh
 ├── output/        # auto-created on first real run
 ├── logs/          # auto-created on first real run
 └── state.json     # auto-created on first real run
 ```
 
-Waverunner installs one shared runner plus the selected CLI adapter. It copies a `howtouse.md` guide for humans or AI agents, but it does not create or manage `specs/`, `prompts/`, or `master_prompt.md`. Your prompt and techspec files stay fully user-owned and can live anywhere in the project.
+Waverunner installs one shared runner plus all CLI adapters, so any installation can run claude executions, codex executions, or a mix of both. It copies a `howtouse.md` guide for humans or AI agents, but it does not create or manage `specs/`, `prompts/`, or `master_prompt.md`. Your prompt and techspec files stay fully user-owned and can live anywhere in the project.
 
 ## Requirements
 
 - Bash 3.2+
 - `jq`
 - `git`
-- One supported AI CLI installed and already authenticated:
+- Each AI CLI your wave actually uses, installed and already authenticated:
   - `claude`
   - `codex`
-- `perl` when `cli` is `claude`
+- `perl` when any execution runs on `claude`
 
-If a required dependency is missing, `install.sh` and `run.sh` exit with code `2` and print a one-line install hint. For `cli=claude`, that includes `perl`.
+If a required dependency is missing, `install.sh` and `run.sh` exit with code `2` and print a one-line install hint. Only the CLIs referenced by the wave's executions are required — a codex-only wave never needs `claude` or `perl`, and vice versa.
 
 ## Install
 
@@ -73,7 +74,7 @@ The installer prompts for:
 1. Project root path
 2. Install target path
 3. Whether to append the install dir to `<project_root>/.gitignore`
-4. CLI choice: `claude` or `codex`
+4. Default CLI: `claude` or `codex` (individual executions can override it)
 5. Git dir, or blank to reuse project root
 
 Behavior to know:
@@ -82,7 +83,7 @@ Behavior to know:
 - The install target defaults to `<project_root>/waverunner`.
 - If the install target already exists, the installer can remove it or let you choose another path.
 - If the install target lives under the project root, the installer can append `/<relative-target>/` to the project `.gitignore` without duplicating the entry.
-- If you select `claude`, the installer checks that `perl` is available before completing.
+- If you select `claude` as the default CLI, the installer checks that `perl` is available before completing.
 - The generated `config.json` contains one baked-in example execution.
 - The installer copies `howtouse.md` and prints a ready-to-paste prompt that points your project AI agent at it.
 
@@ -92,7 +93,7 @@ Upgrade an existing installed runner:
 ./install.sh --upgrade /path/to/installed/waverunner
 ```
 
-Current upgrade behavior overwrites `run.sh`, `howtouse.md`, and the selected adapter file.
+Current upgrade behavior overwrites `run.sh`, `ui.sh`, `howtouse.md`, and all adapter files.
 
 ## Configure
 
@@ -131,8 +132,8 @@ Example:
       "techspec_path": "/var/www/my_project/specs/SPEC-03.md",
       "prompt_path": "/var/www/my_project/prompts/SPEC-03.md",
       "parallel": "no",
-      "model": "claude-sonnet-4-6",
-      "effort": "high"
+      "cli": "codex",
+      "model": "codex-mini-latest"
     }
   ]
 }
@@ -140,13 +141,13 @@ Example:
 
 Top-level fields:
 
-- `cli`: `claude` or `codex`
+- `cli`: default CLI for executions, `claude` or `codex`; individual executions may override it
 - `project_root`: validated sanity reference for the target project
 - `git_dir`: repo root used for `git worktree`
 - `master_prompt_path`: project-wide prompt file
 - `output_base`: base directory for per-execution outputs
 - `max_parallel`: maximum allowed size of one parallel batch; defaults to `3`
-- `claude_max_turns`: optional for `claude`; defaults to `300`
+- `claude_max_turns`: optional; applies to executions running on `claude`; defaults to `300`
 - `executions`: ordered execution list
 
 Per-execution fields:
@@ -155,7 +156,8 @@ Per-execution fields:
 - `prompt` or `prompt_path`: at least one required
 - `parallel`: required, `yes` or `no`
 - `model`: required
-- `effort`: required for `claude`, ignored for `codex`
+- `cli`: optional, `claude` or `codex`; overrides the top-level `cli` for this execution, so one wave can mix both CLIs
+- `effort`: required for executions running on `claude`, ignored for `codex`
 
 Barrier entry:
 
@@ -195,7 +197,7 @@ Before any execution starts, `run.sh` validates:
 
 - `config.json` exists and is valid JSON
 - required top-level fields are present
-- the selected AI CLI is installed
+- every AI CLI referenced by the wave's executions is installed
 - `project_root`, `git_dir`, and `master_prompt_path` resolve correctly
 - every referenced `techspec_path` and `prompt_path` exists
 - `output_base` can be created or written

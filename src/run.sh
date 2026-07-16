@@ -33,9 +33,11 @@ SKIPPED_COUNT=0
 LOCK_HELD=0
 
 CHILDREN=()
+ADAPTERS_LOADED=" "
 
 EXEC_COUNT=0
 EXEC_IS_BARRIER=()
+EXEC_CLI=()
 EXEC_PARALLEL=()
 EXEC_TECHSPEC_PATH=()
 EXEC_PROMPT_INLINE=()
@@ -119,20 +121,47 @@ require_cmd() {
   fi
 }
 
-load_adapter() {
-  local adapter_path="$ADAPTERS_DIR/$CLI.sh"
+# Adapters are namespaced per CLI (claude_run_cli, codex_run_cli, ...) so
+# several can be loaded in one process and mixed within a single wave.
+ensure_adapter_loaded() {
+  local cli="$1"
+  local adapter_path="$ADAPTERS_DIR/$cli.sh"
+  local fn
+
+  case "$ADAPTERS_LOADED" in
+    *" $cli "*) return 0 ;;
+  esac
 
   if [[ ! -f "$adapter_path" ]]; then
-    die "adapter not found for cli=$CLI: $adapter_path" 2
+    die "adapter not found for cli=$cli: $adapter_path" 2
   fi
 
   # shellcheck disable=SC1090
   . "$adapter_path"
 
-  command -v adapter_require_cli >/dev/null 2>&1 || die "adapter missing required function: adapter_require_cli" 2
-  command -v adapter_validate_execution >/dev/null 2>&1 || die "adapter missing required function: adapter_validate_execution" 2
-  command -v adapter_print_execution_plan >/dev/null 2>&1 || die "adapter missing required function: adapter_print_execution_plan" 2
-  command -v adapter_run_cli >/dev/null 2>&1 || die "adapter missing required function: adapter_run_cli" 2
+  for fn in require_cli validate_execution print_execution_plan run_cli; do
+    command -v "${cli}_${fn}" >/dev/null 2>&1 || die "adapter $cli.sh missing required function: ${cli}_${fn}" 2
+  done
+
+  "${cli}_require_cli"
+
+  if [[ "$cli" == "claude" ]]; then
+    # Apply the config override AFTER sourcing the adapter so the adapter's
+    # baked-in default cannot clobber the operator's claude_max_turns.
+    CLAUDE_MAX_TURNS=$(jq -r '.claude_max_turns // 300' "$CONFIG_PATH")
+    if ! [[ "$CLAUDE_MAX_TURNS" =~ ^[1-9][0-9]*$ ]]; then
+      die "config.json field claude_max_turns must be a positive integer; got: $CLAUDE_MAX_TURNS" 2
+    fi
+  fi
+
+  ADAPTERS_LOADED="$ADAPTERS_LOADED$cli "
+}
+
+adapter_call() {
+  local cli="$1"
+  local fn="$2"
+  shift 2
+  "${cli}_${fn}" "$@"
 }
 
 check_prereqs() {
@@ -380,7 +409,7 @@ build_resume_key() {
     prompt_inline_hash=$(hash_string "${EXEC_PROMPT_INLINE[$idx]}") || die "failed to hash inline prompt for executions[$idx]" 2
   fi
 
-  printf '%s\n' "cli=$CLI
+  printf '%s\n' "cli=${EXEC_CLI[$idx]}
 model=${EXEC_MODEL[$idx]}
 effort=${EXEC_EFFORT[$idx]}
 master_hash=$master_hash
@@ -481,6 +510,7 @@ load_config() {
   local prompt_path_raw
   local model
   local effort
+  local exec_cli
   local techspec_abs
   local prompt_path_abs
   local base_name
@@ -509,14 +539,6 @@ load_config() {
   if ! [[ "$MAX_PARALLEL" =~ ^[1-9][0-9]*$ ]]; then
     die "config.json field max_parallel must be a positive integer; got: $MAX_PARALLEL" 2
   fi
-  if [[ "$CLI" == "claude" ]]; then
-    CLAUDE_MAX_TURNS=$(jq -r '.claude_max_turns // 300' "$CONFIG_PATH")
-    if ! [[ "$CLAUDE_MAX_TURNS" =~ ^[1-9][0-9]*$ ]]; then
-      die "config.json field claude_max_turns must be a positive integer; got: $CLAUDE_MAX_TURNS" 2
-    fi
-  fi
-  load_adapter
-  adapter_require_cli
 
   PROJECT_ROOT=$(normalize_path "$PROJECT_ROOT" "$SCRIPT_DIR")
   GIT_DIR=$(normalize_path "$GIT_DIR" "$SCRIPT_DIR")
@@ -540,6 +562,7 @@ load_config() {
     prompt_path_raw=$(json_string "$entry_json" '.prompt_path // empty')
     model=$(json_string "$entry_json" '.model // empty')
     effort=$(json_string "$entry_json" '.effort // empty')
+    exec_cli=$(json_string "$entry_json" '.cli // empty')
 
     [[ -n "$parallel" ]] || die "executions[$i] missing required field: parallel" 2
     if [[ "$parallel" != "yes" && "$parallel" != "no" ]]; then
@@ -549,6 +572,7 @@ load_config() {
     if [[ -z "$techspec_raw" ]]; then
       if [[ "$parallel" == "no" && "$key_count" -eq 1 ]]; then
         EXEC_IS_BARRIER[$i]="1"
+        EXEC_CLI[$i]=""
         EXEC_PARALLEL[$i]="$parallel"
         EXEC_TECHSPEC_PATH[$i]=""
         EXEC_PROMPT_INLINE[$i]=""
@@ -567,6 +591,14 @@ load_config() {
       die "executions[$i] requires at least one of prompt or prompt_path" 2
     fi
 
+    if [[ -z "$exec_cli" ]]; then
+      exec_cli="$CLI"
+    fi
+    if [[ "$exec_cli" != "claude" && "$exec_cli" != "codex" ]]; then
+      die "executions[$i].cli must be \"claude\" or \"codex\"; got: $exec_cli" 2
+    fi
+    ensure_adapter_loaded "$exec_cli"
+
     techspec_abs=$(normalize_path "$techspec_raw" "$SCRIPT_DIR")
     [[ -f "$techspec_abs" ]] || die "techspec not found for executions[$i]: $techspec_abs" 2
 
@@ -581,6 +613,7 @@ load_config() {
     base_exec_id=$(printf '%02d_%s' $((i + 1)) "$(sanitize_name "$bare_name")")
 
     EXEC_IS_BARRIER[$i]="0"
+    EXEC_CLI[$i]="$exec_cli"
     EXEC_PARALLEL[$i]="$parallel"
     EXEC_TECHSPEC_PATH[$i]="$techspec_abs"
     EXEC_PROMPT_INLINE[$i]="$prompt_inline"
@@ -588,7 +621,7 @@ load_config() {
     EXEC_MODEL[$i]="$model"
     EXEC_EFFORT[$i]="$effort"
     EXEC_ID[$i]="$(unique_exec_id "$base_exec_id")"
-    adapter_validate_execution "$i"
+    adapter_call "$exec_cli" validate_execution "$i"
     EXEC_RESUME_KEY[$i]="$(build_resume_key "$i")"
 
     if [[ "$parallel" == "yes" ]]; then
@@ -725,8 +758,9 @@ print_execution_plan() {
   resolve_worktree_plan "$idx"
 
   plan_header "${EXEC_ID[$idx]}"
+  plan_field 'cli' "${EXEC_CLI[$idx]}"
   plan_field 'model' "${EXEC_MODEL[$idx]}"
-  adapter_print_execution_plan "$idx"
+  adapter_call "${EXEC_CLI[$idx]}" print_execution_plan "$idx"
   if [[ -n "${EXEC_PROMPT_INLINE[$idx]}" ]]; then
     plan_field 'prompt' 'inline'
   fi
@@ -804,7 +838,7 @@ classify_task_failure() {
 
 run_task_async() {
   local idx="$1"
-  adapter_run_cli \
+  adapter_call "${EXEC_CLI[$idx]}" run_cli \
     "${EXEC_PROMPT_FILE[$idx]}" \
     "${EXEC_LOG_PATH[$idx]}" \
     "${EXEC_WORKTREE_PATH[$idx]}" \
@@ -958,7 +992,7 @@ run_batch() {
       fi
     fi
 
-    ui_status_line 'START' "${EXEC_ID[$idx]}" "model=${EXEC_MODEL[$idx]} | worktree=${EXEC_WORKTREE_PATH[$idx]}"
+    ui_status_line 'START' "${EXEC_ID[$idx]}" "cli=${EXEC_CLI[$idx]} | model=${EXEC_MODEL[$idx]} | worktree=${EXEC_WORKTREE_PATH[$idx]}"
     mark_running "$idx"
     run_task_async "$idx" &
     pid=$!
@@ -1173,7 +1207,7 @@ run_check() {
 
   ui_heading 'Config Check'
   ui_success 'Config check passed'
-  ui_kv 'CLI' "$CLI"
+  ui_kv 'Default CLI' "$CLI"
   ui_kv 'Project root' "$PROJECT_ROOT"
   ui_kv 'Git dir' "$GIT_DIR"
   ui_kv 'Master prompt' "$MASTER_PROMPT_PATH"
@@ -1251,7 +1285,7 @@ run_execute() {
 
   ui_heading 'Wave Run'
   ui_kv 'Wave started' "$WAVE_TS"
-  ui_kv 'CLI' "$CLI"
+  ui_kv 'Default CLI' "$CLI"
   ui_kv 'Max parallel' "$MAX_PARALLEL"
   if [[ "$RESUME_ONLY" == "1" ]]; then
     ui_kv 'Mode' 'resume'

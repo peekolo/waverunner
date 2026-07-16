@@ -24,13 +24,13 @@ The AI agent should:
 
 Top-level fields:
 
-- `cli`: `claude` or `codex`
+- `cli`: default CLI for executions, `claude` or `codex`; individual executions may override it
 - `project_root`: root path of the core project
 - `git_dir`: git repository root, usually the same as `project_root`
 - `master_prompt_path`: project-wide prompt file used for every execution
 - `output_base`: base directory for wave outputs, usually `./output`
 - `max_parallel`: maximum allowed size of any parallel batch; default is `3`
-- `claude_max_turns`: optional for `claude`; defaults to `300`
+- `claude_max_turns`: optional; applies to executions running on `claude`; defaults to `300`
 - `executions`: ordered list of execution entries
 
 Per-execution fields:
@@ -39,7 +39,20 @@ Per-execution fields:
 - `prompt` or `prompt_path`: at least one required
 - `parallel`: required, `yes` or `no`
 - `model`: required
-- `effort`: required for `claude`, ignored for `codex`
+- `cli`: optional, `claude` or `codex`; overrides the top-level `cli` for this execution, so one wave can mix both CLIs
+- `effort`: required for executions running on `claude`, ignored for `codex`
+
+Mixed-CLI example:
+
+```json
+{
+  "techspec_path": "/path/to/specs/SPEC-02.md",
+  "prompt_path": "/path/to/prompts/SPEC-02.md",
+  "parallel": "yes",
+  "cli": "codex",
+  "model": "codex-mini-latest"
+}
+```
 
 Barrier entry:
 

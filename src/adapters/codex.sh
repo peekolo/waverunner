@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 
-adapter_require_cli() {
+codex_require_cli() {
   require_cmd codex
 }
 
-adapter_validate_execution() {
+codex_validate_execution() {
   local idx="$1"
 
   if [[ -n "${EXEC_EFFORT[$idx]}" ]] && [[ -z "${CODEX_EFFORT_WARNED:-}" ]]; then
-    say_err 'warning: executions[].effort is ignored when cli=codex'
+    say_err 'warning: executions[].effort is ignored for codex executions'
     CODEX_EFFORT_WARNED=1
   fi
 }
 
-adapter_print_execution_plan() {
+codex_print_execution_plan() {
   plan_field 'mode' 'safe_unattended (approval=never sandbox=workspace-write)'
 }
 
-adapter_run_cli() {
+codex_run_cli() {
   local prompt_file="$1"
   local log_file="$2"
   local worktree_path="$3"
