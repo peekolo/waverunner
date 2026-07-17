@@ -17,7 +17,7 @@ The installer also copies `howtouse.md` and prints a ready-to-paste prompt for y
 4. Replace the baked-in example execution with your real execution list.
 5. Point each execution at the real techspec and prompt files you want to use.
 6. Set `max_parallel` if you want something other than the default of `3`.
-7. If `cli` is `claude`, set `claude_max_turns` if you want something other than the default of `300`.
+7. If any execution runs on `claude`, set `claude_max_turns` if you want something other than the default of `300`.
 8. Keep each parallel batch at or below `max_parallel` and insert `{ "parallel": "no" }` breaks manually when needed.
 9. Inspect the plan:
 
@@ -50,6 +50,8 @@ The installed adapters currently run in these unattended modes:
 
 That means the wave should not pause for approval prompts. Claude currently uses the same dangerous-permissions pattern that already works in your other project, constrained by an explicit allowed-tools list.
 
+Both adapters are always installed. The top-level `cli` in `config.json` is only the default; any execution can set its own `cli` to run on the other CLI, so one wave can mix `claude` and `codex` tasks.
+
 ## Recommended Workflow
 
 1. Keep the file referenced by `master_prompt_path` stable and project-wide.
@@ -77,6 +79,18 @@ Example:
   "parallel": "yes",
   "model": "claude-sonnet-4-6",
   "effort": "high"
+}
+```
+
+A codex execution in the same wave only needs a `cli` override:
+
+```json
+{
+  "techspec_path": "./specs/SPEC-08.md",
+  "prompt_path": "./prompts/SPEC-08.md",
+  "parallel": "yes",
+  "cli": "codex",
+  "model": "codex-mini-latest"
 }
 ```
 
@@ -175,8 +189,9 @@ Refresh an installed runner:
 Current upgrade behavior replaces:
 
 - `run.sh`
+- `ui.sh`
 - `howtouse.md`
-- `adapters/<cli>.sh`
+- all files under `adapters/`
 
 It does not overwrite:
 
@@ -189,8 +204,8 @@ It does not overwrite:
 
 Before a real run:
 
-1. Confirm `jq`, `git`, and the selected AI CLI are installed.
-2. Confirm the CLI is already authenticated.
+1. Confirm `jq`, `git`, and every AI CLI referenced by the wave's executions are installed.
+2. Confirm each CLI is already authenticated.
 3. Confirm `git_dir` points at the intended repository root.
 4. Confirm the file referenced by `master_prompt_path` reflects current project constraints.
 5. Confirm no parallel batch exceeds `max_parallel`.
